@@ -1,0 +1,51 @@
+# Sinter License
+
+## NOTICE: Research and Educational Use Only
+
+Sinter is a research prototype exploring compiler-based optimization for image augmentation pipelines.
+This project is intended for educational purposes and to demonstrate novel architectural approaches.
+
+## Python Bindings (Creative Commons BY-NC-SA 4.0)
+
+The Python bindings, API, and usage are licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International License:
+
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+You are free to:
+- **Share**: Copy and redistribute the material in any medium or format
+- **Adapt**: Remix, transform, and build upon the material
+
+Under the following terms:
+- **Attribution**: You must give appropriate credit and indicate if changes were made
+- **NonCommercial**: You may not use the material for commercial purposes
+- **ShareAlike**: If you remix, transform, or build upon the material, you must distribute
+  your contributions under the same license
+
+## Rust Core Engine (GPL-3.0 License)
+
+The underlying Rust implementation and compilation engine are licensed under the
+GNU General Public License Version 3.0:
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+## What This Means
+
+- ✅ **Research and education**: Use and modify for learning, research, and academic projects
+- ✅ **Open source contributions**: Improvements must be shared back under the same terms
+- ✅ **Credit**: Please cite the original project if you use these ideas
+- ❌ **Commercial use**: Not permitted for production systems or commercial products
+- ❌ **Closed-source forks**: Modifications to the Rust engine must remain open source
+
+This license structure is intentional: Sinter is an exploration of ideas, not a product.

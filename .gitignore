@@ -1,0 +1,22 @@
+/target
+__pycache__/
+*.pyc
+*.pytest_cache/
+.pytest_cache/
+.mypy_cache/
+*.so
+.idea/
+.vscode/
+*.png
+.DS_Store
+
+# Exclude docs/ideas from LSP context (keep for reference)
+docs/ideas/
+.claude/
+
+# OpenCV static build (large libraries and source)
+opencv-static/
+
+# Rust build metadata
+*.rmeta
+libbuild.rmeta

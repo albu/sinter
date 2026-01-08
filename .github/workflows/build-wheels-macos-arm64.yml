@@ -1,0 +1,80 @@
+name: Build Wheels (macOS ARM64 + Static OpenCV)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    runs-on: macos-14
+
+    env:
+      OPENCV_VERSION: "4.12.0"
+      OPENCV_STATIC_DIR: "${{ github.workspace }}/opencv-static/build"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Cache OpenCV static build
+      id: cache-opencv
+      uses: actions/cache@v4
+      with:
+        path: opencv-static
+        key: opencv-${{ env.OPENCV_VERSION }}-${{ runner.os }}-arm64-${{ hashFiles('scripts/build_opencv_static.sh') }}
+        restore-keys: |
+          opencv-${{ env.OPENCV_VERSION }}-${{ runner.os }}-arm64-
+
+    - name: Build OpenCV (if not cached)
+      if: steps.cache-opencv.outputs.cache-hit != 'true'
+      run: |
+        echo "Building OpenCV ${OPENCV_VERSION} from source..."
+        ./scripts/build_opencv_static.sh
+
+    - name: Verify OpenCV build
+      run: |
+        ls -lh opencv-static/build/lib/libopencv_*.a
+
+    - name: Install maturin
+      run: |
+        pip install maturin
+
+    - name: Build wheel with static OpenCV
+      run: |
+        source scripts/setup_static_opencv.sh
+        export DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib:$DYLD_LIBRARY_PATH
+        maturin build --release --features "python,opencv-static" --out dist
+
+    - name: Verify static linking
+      run: |
+        WHEEL=$(ls dist/*.whl | head -1)
+        echo "Wheel: $WHEEL"
+        ls -lh "$WHEEL"
+
+    - name: Upload wheel as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sinter-macos-arm64-static-opencv
+        path: dist/*.whl
+        retention-days: 30
+
+    - name: Upload wheel to release (on tags)
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/*.whl
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

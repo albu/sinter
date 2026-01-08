@@ -1,0 +1,18 @@
+{
+  "sysroot": null,
+  "crates": [
+    {
+      "root_module": "src/lib.rs",
+      "deps": [],
+      "display_name": "sinter",
+      "edition": "2026",
+      "include_dirs": [
+        "src"
+      ],
+      "exclude_dirs": [
+        "target",
+        "examples"
+      ]
+    }
+  ]
+}
