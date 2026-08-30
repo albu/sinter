@@ -636,7 +636,10 @@ class TestGrayscaleCorrectness:
             ref = cv2.GaussianBlur(img, (3, 3), 0, borderType=cv2.BORDER_REFLECT_101)
             if c == 1 and ref.ndim == 2:
                 ref = ref[:, :, np.newaxis]
-            assert_close(sinter_res, ref, atol=2, max_mae=0.5, msg=f"Grayscale GaussianBlur 3x3 (c={c})")
+            # Sinter's Gaussian convention is per-pass integer truncation (same as the RGB path
+            # and the scalar reference); cv2 rounds in fixed point. Gray now matches RGB, so use
+            # the same tolerance as the RGB GaussianBlur tests.
+            assert_close(sinter_res, ref, atol=2, max_mae=1.0, msg=f"Grayscale GaussianBlur 3x3 (c={c})")
 
             # MedianBlur 3x3
             sinter_res = Compose([MedianBlur(kernel_size=3)]).apply(img.copy())
@@ -644,5 +647,4 @@ class TestGrayscaleCorrectness:
             if c == 1 and ref.ndim == 2:
                 ref = ref[:, :, np.newaxis]
             assert_exact(sinter_res, ref, f"Grayscale MedianBlur 3x3 (c={c})")
-
 

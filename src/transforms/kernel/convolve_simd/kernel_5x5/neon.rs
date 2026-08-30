@@ -494,13 +494,13 @@ unsafe fn blur5_gray_u8(p_m2: uint8x16_t, p_m1: uint8x16_t, p_0: uint8x16_t, p_p
     let inner_lo = vaddl_u8(vget_low_u8(p_m1), vget_low_u8(p_p1));
     let mut sum_lo = vmlal_u8(outer_lo, vget_low_u8(p_0), vdup_n_u8(6));
     sum_lo = vaddq_u16(sum_lo, vshlq_n_u16(inner_lo, 2));
-    let res_lo = vrshrn_n_u16(sum_lo, 4);
+    let res_lo = vshrn_n_u16(sum_lo, 4);
 
     let outer_hi = vaddl_u8(vget_high_u8(p_m2), vget_high_u8(p_p2));
     let inner_hi = vaddl_u8(vget_high_u8(p_m1), vget_high_u8(p_p1));
     let mut sum_hi = vmlal_u8(outer_hi, vget_high_u8(p_0), vdup_n_u8(6));
     sum_hi = vaddq_u16(sum_hi, vshlq_n_u16(inner_hi, 2));
-    let res_hi = vrshrn_n_u16(sum_hi, 4);
+    let res_hi = vshrn_n_u16(sum_hi, 4);
 
     vcombine_u8(res_lo, res_hi)
 }
@@ -529,7 +529,7 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
                 let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
             }
-            *out_ptr.add(x) = ((sum + 8) >> 4) as u8;
+            *out_ptr.add(x) = (sum >> 4) as u8;
         }
 
         let simd_start = radius;
@@ -556,7 +556,7 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
                 let px = (rem_x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
             }
-            *out_ptr.add(rem_x) = ((sum + 8) >> 4) as u8;
+            *out_ptr.add(rem_x) = (sum >> 4) as u8;
         }
 
         // Right edge
@@ -566,7 +566,7 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
                 let px = (rx as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
             }
-            *out_ptr.add(rx) = ((sum + 8) >> 4) as u8;
+            *out_ptr.add(rx) = (sum >> 4) as u8;
         }
     }
 
@@ -603,7 +603,90 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
                 + *ptr_0.add(x) as u32 * 6
                 + *ptr_p1.add(x) as u32 * 4
                 + *ptr_p2.add(x) as u32;
-            *out_ptr.add(x) = ((sum + 8) >> 4) as u8;
+            *out_ptr.add(x) = (sum >> 4) as u8;
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests {
+    use super::*;
+    use crate::core::FusableImage;
+
+    /// Scalar two-pass separable reference for 1-channel images, truncating each pass
+    /// (the library's canonical Gaussian convention; the NEON gray path must match).
+    fn scalar_two_pass_gray(
+        data: &[u8],
+        width: usize,
+        height: usize,
+        kernel: &[u32],
+        scale: u32,
+    ) -> Vec<u8> {
+        let r = kernel.len() / 2;
+        let mut h = vec![0u8; data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum: u32 = 0;
+                for (kk, kv) in kernel.iter().enumerate() {
+                    let px = (x as i32 + kk as i32 - r as i32).clamp(0, width as i32 - 1) as usize;
+                    sum += data[y * width + px] as u32 * kv;
+                }
+                h[y * width + x] = (sum / scale) as u8;
+            }
+        }
+        let mut out = vec![0u8; data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum: u32 = 0;
+                for (kk, kv) in kernel.iter().enumerate() {
+                    let py = (y as i32 + kk as i32 - r as i32).clamp(0, height as i32 - 1) as usize;
+                    sum += h[py * width + x] as u32 * kv;
+                }
+                out[y * width + x] = (sum / scale) as u8;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_gray_5x5_matches_scalar_truncation() {
+        // Non-multiple of 16 so SIMD tiles, scalar remainder, and both edges are all exercised.
+        let (w, h) = (33usize, 17usize);
+        let mut data: Vec<u8> = (0..w * h)
+            .map(|i| ((i as u64 * 40503) % 256) as u8)
+            .collect();
+        let expected = scalar_two_pass_gray(&data, w, h, &[1, 4, 6, 4, 1], 16);
+
+        let mut img = FusableImage::new(&mut data, w, h, 1);
+        unsafe {
+            convolve_separable_neon_5(&mut img, &[1, 4, 6, 4, 1], 16);
+        }
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for i in 0..data.len() {
+            let diff = (data[i] as i32 - expected[i] as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 8 {
+                    eprintln!(
+                        "  idx={} (x={}, y={}): gray={} expected={}",
+                        i,
+                        i % w,
+                        i / w,
+                        data[i],
+                        expected[i]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            mismatches,
+            0,
+            "gray 5x5 mismatch: {} mismatches, max_diff={}",
+            mismatches,
+            max_diff
+        );
     }
 }

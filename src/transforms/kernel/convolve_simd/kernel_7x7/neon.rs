@@ -134,6 +134,89 @@ pub(crate) unsafe fn convolve_1d_vertical_neon_7(image: &mut FusableImage, kerne
     }
 }
 
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests {
+    use super::*;
+    use crate::core::FusableImage;
+
+    /// Scalar two-pass separable reference for 1-channel images, truncating each pass
+    /// (the library's canonical Gaussian convention; the NEON gray path must match).
+    fn scalar_two_pass_gray(
+        data: &[u8],
+        width: usize,
+        height: usize,
+        kernel: &[u32],
+        scale: u32,
+    ) -> Vec<u8> {
+        let r = kernel.len() / 2;
+        let mut h = vec![0u8; data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum: u32 = 0;
+                for (kk, kv) in kernel.iter().enumerate() {
+                    let px = (x as i32 + kk as i32 - r as i32).clamp(0, width as i32 - 1) as usize;
+                    sum += data[y * width + px] as u32 * kv;
+                }
+                h[y * width + x] = (sum / scale) as u8;
+            }
+        }
+        let mut out = vec![0u8; data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum: u32 = 0;
+                for (kk, kv) in kernel.iter().enumerate() {
+                    let py = (y as i32 + kk as i32 - r as i32).clamp(0, height as i32 - 1) as usize;
+                    sum += h[py * width + x] as u32 * kv;
+                }
+                out[y * width + x] = (sum / scale) as u8;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_gray_7x7_matches_scalar_truncation() {
+        // Non-multiple of 16 so SIMD tiles, scalar remainder, and both edges are all exercised.
+        let (w, h) = (33usize, 17usize);
+        let mut data: Vec<u8> = (0..w * h)
+            .map(|i| ((i as u64 * 40503) % 256) as u8)
+            .collect();
+        let expected = scalar_two_pass_gray(&data, w, h, &[2, 7, 14, 18, 14, 7, 2], 64);
+
+        let mut img = FusableImage::new(&mut data, w, h, 1);
+        unsafe {
+            convolve_separable_neon_7(&mut img, &[2, 7, 14, 18, 14, 7, 2], 64);
+        }
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for i in 0..data.len() {
+            let diff = (data[i] as i32 - expected[i] as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 8 {
+                    eprintln!(
+                        "  idx={} (x={}, y={}): gray={} expected={}",
+                        i,
+                        i % w,
+                        i / w,
+                        data[i],
+                        expected[i]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            mismatches,
+            0,
+            "gray 7x7 mismatch: {} mismatches, max_diff={}",
+            mismatches,
+            max_diff
+        );
+    }
+}
+
 #[cfg(not(target_arch = "aarch64"))]
 pub(crate) unsafe fn convolve_1d_vertical_neon_7(_image: &mut FusableImage, _kernel: &[i32], _scale: i32) {
     // Fallback for non-ARM architectures
@@ -509,7 +592,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
                 let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
-            *out_ptr.add(x) = ((sum + 32) >> 6) as u8;
+            *out_ptr.add(x) = (sum >> 6) as u8;
         }
 
         let simd_start = radius;
@@ -534,7 +617,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(p1), k4);
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(p2), k5);
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(p3), k6);
-            let lo = vrshrn_n_u16(sum_lo, 6);
+            let lo = vshrn_n_u16(sum_lo, 6);
 
             // High 8
             let mut sum_hi = vmull_u8(vget_high_u8(p_3), k0);
@@ -544,7 +627,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(p1), k4);
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(p2), k5);
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(p3), k6);
-            let hi = vrshrn_n_u16(sum_hi, 6);
+            let hi = vshrn_n_u16(sum_hi, 6);
 
             vst1q_u8(out_ptr.add(x), vcombine_u8(lo, hi));
             x += TILE;
@@ -557,7 +640,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
                 let px = (rem_x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
-            *out_ptr.add(rem_x) = ((sum + 32) >> 6) as u8;
+            *out_ptr.add(rem_x) = (sum >> 6) as u8;
         }
 
         // Right edge
@@ -567,7 +650,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
                 let px = (rx as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
                 sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
-            *out_ptr.add(rx) = ((sum + 32) >> 6) as u8;
+            *out_ptr.add(rx) = (sum >> 6) as u8;
         }
     }
 
@@ -608,7 +691,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p1), k4);
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p2), k5);
             sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p3), k6);
-            let lo = vrshrn_n_u16(sum_lo, 6);
+            let lo = vshrn_n_u16(sum_lo, 6);
 
             // High 8
             let mut sum_hi = vmull_u8(vget_high_u8(r_m3), k0);
@@ -618,7 +701,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p1), k4);
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p2), k5);
             sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p3), k6);
-            let hi = vrshrn_n_u16(sum_hi, 6);
+            let hi = vshrn_n_u16(sum_hi, 6);
 
             vst1q_u8(out_ptr.add(offset), vcombine_u8(lo, hi));
         }
@@ -631,7 +714,7 @@ unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
                 + *ptr_p1.add(x) as u32 * 14
                 + *ptr_p2.add(x) as u32 * 7
                 + *ptr_p3.add(x) as u32 * 2;
-            *out_ptr.add(x) = ((sum + 32) >> 6) as u8;
+            *out_ptr.add(x) = (sum >> 6) as u8;
         }
     }
 }
