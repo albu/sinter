@@ -19,7 +19,6 @@ test = [
 ]
 
 [tool.maturin]
-python-source = "python"
 module-name = "sinter"
 features = ["python"]
 

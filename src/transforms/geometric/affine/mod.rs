@@ -1,12 +1,9 @@
 // Affine geometric transform
 //
 // Applies affine transformation: scaling, rotation, translation, shearing.
-//
-// OPTIMIZATION: Optional OpenCV backend for warp_affine using highly optimized C code.
+// OPTIMIZATION: Fast Q16.16 fixed-point coordinate stepper and bundled RGB bilinear interpolation.
 
 mod interpolation;
-#[cfg(feature = "opencv")]
-mod opencv;
 mod rust_impl;
 mod tests;
 
@@ -14,9 +11,6 @@ use crate::core::{
     AccessPattern, BarrierImage, Executable, FusableImage, LabelTransform, ShapeEffect, Transform,
 };
 use rust_impl::execute_rust;
-
-#[cfg(feature = "opencv")]
-use opencv::execute_with_opencv;
 
 /// Interpolation method for affine transform
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,7 +110,6 @@ pub enum AffineBorderMode {
 ///
 /// # Notes
 /// - Allocates a new buffer (OutOfPlace)
-/// - With `opencv` feature, uses OpenCV's optimized warp_affine
 #[derive(Debug, Clone, PartialEq)]
 pub struct Affine {
     pub params: AffineParams,
@@ -359,21 +352,8 @@ impl LabelTransform for Affine {
 }
 
 impl Executable for Affine {
-    #[cfg(not(feature = "opencv"))]
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
         Some(execute_rust(self, image))
-    }
-
-    #[cfg(feature = "opencv")]
-    fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        // Try OpenCV backend first, fall back to Rust implementation on error
-        match execute_with_opencv(self, image) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                // Fallback to Rust implementation
-                Some(execute_rust(self, image))
-            }
-        }
     }
 }
 

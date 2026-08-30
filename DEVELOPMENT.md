@@ -334,7 +334,7 @@ try_execute_transform!(transform, image, matched, result, {
 ### Step 7: Build and Test
 
 ```bash
-maturin develop --release --features "python,opencv"
+maturin develop --release --features "python"
 
 # Test in Python
 python -c "

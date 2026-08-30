@@ -1,57 +1,40 @@
-// NEON SIMD implementation for horizontal flip (grayscale only)
+// NEON SIMD implementation for horizontal flip (grayscale and RGB)
 //
-// Uses vrev64q_u8 for efficient 64-bit lane reversal.
+// Uses vrev64q_u8 and vcombine_u8 for efficient register reversal.
 
-use crate::core::FusableImage;
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn reverse16(v: uint8x16_t) -> uint8x16_t {
+    let rev = vrev64q_u8(v);
+    vcombine_u8(vget_high_u8(rev), vget_low_u8(rev))
+}
 
 /// Reverse a grayscale row using NEON SIMD
-///
-/// Algorithm:
-/// 1. Process 16-byte (128-bit) chunks from both ends
-/// 2. Reverse each chunk using vrev64q_u8 (reverses 8-byte halves)
-/// 3. Swap reversed chunks
-/// 4. Handle remaining middle bytes if width is odd
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn horizontal_flip_gray_neon(row: *mut u8, width: usize) {
-    use std::arch::aarch64::*;
-
-    const CHUNK_SIZE: usize = 16; // 128-bit NEON register
+    const CHUNK_SIZE: usize = 16;
 
     let mut left = 0usize;
     let mut right = width;
 
-    // Process 16-byte chunks from both ends
     while left + CHUNK_SIZE <= right {
         right -= CHUNK_SIZE;
 
-        // Load 16 bytes from each end
         let left_chunk = vld1q_u8(row.add(left));
         let right_chunk = vld1q_u8(row.add(right));
 
-        // Reverse each 8-byte half and swap them
-        // vrev64q_u8 reverses bytes within each 64-bit lane
-        let left_rev = vrev64q_u8(left_chunk);
-        let right_rev = vrev64q_u8(right_chunk);
+        let left_final = reverse16(right_chunk);
+        let right_final = reverse16(left_chunk);
 
-        // Combine: swap the 64-bit lanes
-        // We need to extract the high and low 64-bit lanes and swap them
-        let left_high = vget_high_u8(left_rev);
-        let left_low = vget_low_u8(left_rev);
-        let right_high = vget_high_u8(right_rev);
-        let right_low = vget_low_u8(right_rev);
-
-        // Reconstruct with swapped lanes (high lane first for true reversal)
-        let left_final = vcombine_u8(right_high, right_low);
-        let right_final = vcombine_u8(left_high, left_low);
-
-        // Store back
         vst1q_u8(row.add(left), left_final);
         vst1q_u8(row.add(right), right_final);
 
         left += CHUNK_SIZE;
     }
 
-    // Handle remaining middle bytes (odd width or < 16 bytes remaining)
     while left < right {
         right -= 1;
         let left_ptr = row.add(left);
@@ -63,8 +46,53 @@ pub unsafe fn horizontal_flip_gray_neon(row: *mut u8, width: usize) {
     }
 }
 
-/// Stub for non-ARM64 platforms
-#[cfg(not(target_arch = "aarch64"))]
-pub unsafe fn horizontal_flip_gray_neon(_row: *mut u8, _width: usize) {
-    unreachable!("NEON path should not be called on non-ARM64");
+/// Reverse an RGB row using NEON SIMD
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn horizontal_flip_rgb_neon(row: *mut u8, width: usize) {
+    const CHUNK_SIZE: usize = 16;
+
+    let mut left = 0usize;
+    let mut right = width;
+
+    while left + CHUNK_SIZE <= right {
+        right -= CHUNK_SIZE;
+
+        let left_ptr = row.add(left * 3);
+        let right_ptr = row.add(right * 3);
+
+        let left_rgb = vld3q_u8(left_ptr);
+        let right_rgb = vld3q_u8(right_ptr);
+
+        let rev_r_left = reverse16(left_rgb.0);
+        let rev_g_left = reverse16(left_rgb.1);
+        let rev_b_left = reverse16(left_rgb.2);
+
+        let rev_r_right = reverse16(right_rgb.0);
+        let rev_g_right = reverse16(right_rgb.1);
+        let rev_b_right = reverse16(right_rgb.2);
+
+        vst3q_u8(left_ptr, uint8x16x3_t(rev_r_right, rev_g_right, rev_b_right));
+        vst3q_u8(right_ptr, uint8x16x3_t(rev_r_left, rev_g_left, rev_b_left));
+
+        left += CHUNK_SIZE;
+    }
+
+    while left < right {
+        right -= 1;
+        let left_ptr = row.add(left * 3);
+        let right_ptr = row.add(right * 3);
+
+        let (r0, g0, b0) = (*left_ptr, *left_ptr.add(1), *left_ptr.add(2));
+        let (r1, g1, b1) = (*right_ptr, *right_ptr.add(1), *right_ptr.add(2));
+
+        *left_ptr = r1;
+        *left_ptr.add(1) = g1;
+        *left_ptr.add(2) = b1;
+
+        *right_ptr = r0;
+        *right_ptr.add(1) = g0;
+        *right_ptr.add(2) = b0;
+
+        left += 1;
+    }
 }

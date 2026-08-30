@@ -31,6 +31,146 @@ pub fn apply_median_blur_3x3_huang(image: &mut FusableImage) {
     }
 }
 
+/// Apply 5x5 median blur using a sliding column-histogram algorithm.
+///
+/// Maintains one 256-bin histogram per column for the current 5-row window,
+/// then slides a 5-column window across each row, updating the combined
+/// histogram by removing/adding whole column histograms. Exact median
+/// (matches OpenCV's `medianBlur(ksize=5)`), O(1) amortized per pixel.
+pub fn apply_median_blur_5x5_huang(image: &mut FusableImage) {
+    let width = image.width;
+    let height = image.height;
+    let channels = image.channels;
+    let data = &mut image.data;
+
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let mut output = vec![0u8; data.len()];
+    let stride = width * channels;
+    let radius = 2usize;
+
+    for c in 0..channels {
+        // Column histograms for the current 5-row window [t .. b] (clamped).
+        // Each entry is at most 5 pixels, so u16 is more than sufficient.
+        let mut col_hists = vec![[0u16; 256]; width];
+
+        // Combined 5x5 window histogram for the current output pixel.
+        let mut hist = [0u16; 256];
+        let mut median = 0u8;
+        let mut median_lt = 0u16;
+        let mut median_gt = 0u16;
+        let mut window_pixels = 0u16;
+
+        for y in 0..height {
+            let t = y.saturating_sub(radius);
+            let b = (y + radius).min(height - 1);
+
+            // Vertical slide: bring col_hists up to date for this row window.
+            if y == 0 {
+                for x in 0..width {
+                    let col = &mut col_hists[x];
+                    for yy in 0..=b {
+                        let v = data[yy * stride + x * channels + c];
+                        col[v as usize] += 1;
+                    }
+                }
+            } else {
+                let prev_t = (y - 1).saturating_sub(radius);
+                let prev_b = ((y - 1) + radius).min(height - 1);
+                // Rows that left the window: [prev_t .. t)
+                for yy in prev_t..t {
+                    for x in 0..width {
+                        let v = data[yy * stride + x * channels + c];
+                        col_hists[x][v as usize] -= 1;
+                    }
+                }
+                // Rows that entered the window: (prev_b .. b]
+                for yy in (prev_b + 1)..=b {
+                    for x in 0..width {
+                        let v = data[yy * stride + x * channels + c];
+                        col_hists[x][v as usize] += 1;
+                    }
+                }
+            }
+
+            // Rebuild the combined histogram for the first pixel of the row
+            // (columns max(0, -2) .. min(width-1, 2)).
+            hist = [0u16; 256];
+            window_pixels = 0;
+            let r0 = (0 + radius).min(width - 1);
+            for x in 0..=r0 {
+                let col = &col_hists[x];
+                for (v, cnt) in col.iter().enumerate() {
+                    if *cnt > 0 {
+                        hist[v] += *cnt;
+                        window_pixels += *cnt;
+                    }
+                }
+            }
+            find_initial_median(
+                &hist,
+                &mut median,
+                &mut median_lt,
+                &mut median_gt,
+                window_pixels,
+            );
+            output[y * stride + c] = median;
+
+            // Slide the 5-column window horizontally.
+            for x in 1..width {
+                let l = x.saturating_sub(radius);
+                let r = (x + radius).min(width - 1);
+                let prev_l = (x - 1).saturating_sub(radius);
+                let prev_r = ((x - 1) + radius).min(width - 1);
+
+                // Columns that left the window: [prev_l .. l)
+                for xx in prev_l..l {
+                    let col = &col_hists[xx];
+                    for (v, cnt) in col.iter().enumerate() {
+                        let cnt = *cnt;
+                        if cnt > 0 {
+                            hist[v] -= cnt;
+                            if (v as u8) < median {
+                                median_lt -= cnt;
+                            } else if (v as u8) > median {
+                                median_gt -= cnt;
+                            }
+                        }
+                    }
+                }
+                // Columns that entered the window: (prev_r .. r]
+                for xx in (prev_r + 1)..=r {
+                    let col = &col_hists[xx];
+                    for (v, cnt) in col.iter().enumerate() {
+                        let cnt = *cnt;
+                        if cnt > 0 {
+                            hist[v] += cnt;
+                            if (v as u8) < median {
+                                median_lt += cnt;
+                            } else if (v as u8) > median {
+                                median_gt += cnt;
+                            }
+                        }
+                    }
+                }
+
+                update_median(
+                    &hist,
+                    &mut median,
+                    &mut median_lt,
+                    &mut median_gt,
+                    window_pixels,
+                );
+                output[y * stride + x * channels + c] = median;
+            }
+        }
+    }
+
+    data.copy_from_slice(&output);
+}
+
 /// Huang's algorithm for grayscale images
 fn apply_median_blur_3x3_huang_grayscale(data: &mut [u8], width: usize, height: usize) {
     let mut output = vec![0u8; data.len()];
@@ -285,6 +425,84 @@ fn update_median(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brute-force exact 5x5 median reference (per-pixel sort of the window).
+    fn reference_median_5x5(data: &[u8], width: usize, height: usize, channels: usize) -> Vec<u8> {
+        let mut out = vec![0u8; data.len()];
+        let stride = width * channels;
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..channels {
+                    let mut win = Vec::with_capacity(25);
+                    for dy in -2i32..=2 {
+                        let yy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
+                        for dx in -2i32..=2 {
+                            let xx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                            win.push(data[yy * stride + xx * channels + c]);
+                        }
+                    }
+                    win.sort_unstable();
+                    out[y * stride + x * channels + c] = win[win.len() / 2];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_median_5x5_exact_matches_reference() {
+        for (w, h, ch) in [(1usize, 1usize, 3usize), (2, 2, 1), (5, 5, 1), (16, 13, 3), (32, 32, 3)] {
+            let mut data: Vec<u8> = (0..w * h * ch)
+                .map(|i| ((i as u64 * 2654435761) % 256) as u8)
+                .collect();
+            let expected = reference_median_5x5(&data, w, h, ch);
+
+            let mut img = crate::core::FusableImage::new(&mut data, w, h, ch);
+            apply_median_blur_5x5_huang(&mut img);
+
+            let mut mismatches = 0usize;
+            let mut max_diff = 0i32;
+            for i in 0..data.len() {
+                let diff = (data[i] as i32 - expected[i] as i32).abs();
+                if diff > 0 {
+                    mismatches += 1;
+                    max_diff = max_diff.max(diff);
+                    if w == 2 && h == 2 && mismatches <= 4 {
+                        eprintln!(
+                            "  idx={} (x={}, y={}): got={} expected={}",
+                            i,
+                            i % w,
+                            i / w,
+                            data[i],
+                            expected[i]
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                mismatches,
+                0,
+                "5x5 median mismatch for {}x{}x{}: {} mismatches, max_diff={}",
+                w,
+                h,
+                ch,
+                mismatches,
+                max_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_median_5x5_salt_pepper_exact() {
+        // A single isolated 0 in a 5x5 block of 128s must become 128 exactly.
+        let mut data = vec![128u8; 25 * 3];
+        data[12 * 3] = 0; // center pixel, R channel
+        let mut img = crate::core::FusableImage::new(&mut data, 5, 5, 3);
+        apply_median_blur_5x5_huang(&mut img);
+        assert_eq!(img.data[12 * 3], 128);
+        assert_eq!(img.data[12 * 3 + 1], 128);
+        assert_eq!(img.data[12 * 3 + 2], 128);
+    }
 
     #[test]
     fn test_median_blur_3x3_huang_constant() {

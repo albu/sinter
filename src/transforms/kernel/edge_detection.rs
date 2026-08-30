@@ -88,8 +88,7 @@ impl EdgeDetection {
     ///  1 -4  1
     ///  0  1  0
     fn apply_laplacian(&self, image: &mut FusableImage) {
-        let kernel = [0, 1, 0, 1, -4, 1, 0, 1, 0];
-        convolve_3x3(image, &kernel, 1, 0);
+        super::convolve_2d::apply_laplacian(image);
     }
 
     /// Apply Sobel edge detection

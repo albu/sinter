@@ -20,3 +20,8 @@ opencv-static/
 # Rust build metadata
 *.rmeta
 libbuild.rmeta
+
+# Worktrees
+.worktrees/
+worktrees/
+

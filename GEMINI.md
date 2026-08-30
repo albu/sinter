@@ -75,47 +75,9 @@ maturin develop --features python --release -q 2>&1 | grep -E "(error|warning|Fi
 
 **CRITICAL**: Always use `--release` flag when running benchmarks! Debug mode is **15-40x slower**.
 
-### Building with OpenCV Feature
+### Pure Native Architecture (No OpenCV Dependency)
 
-**CRITICAL - ALWAYS build with opencv feature!**
-
-NEVER build without `--features opencv`. The OpenCV backend provides:
-- **Affine transforms**: 1.5x faster than OpenCV Python (with opencv feature) vs 4x slower (without)
-- **GaussianBlur, MedianBlur, Sharpen**: Hand-optimized C++ performance
-- **Hue/Saturation/Value**: OpenCV's highly optimized HSV implementation
-
-Without OpenCV, Sinter falls back to Rust implementations that are **significantly slower** for these operations.
-
-**IMPORTANT - OpenCV Threading**: ALL benchmarks set `cv2.setNumThreads(0)` to ensure fair single-threaded comparison. The sinter opencv-rust wrapper also runs single-threaded. Any performance differences are NOT due to threading.
-
-**ALWAYS use this build command** (conda environment):
-```bash
-export DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib:/Users/aleksandrbuslaev/miniconda3/envs/py311/lib:$DYLD_LIBRARY_PATH
-maturin develop --release --features "python,opencv"
-```
-
-**NOTE**: DYLD_LIBRARY_PATH needs both:
-- Xcode toolchain (for libclang during OpenCV crate build)
-- Conda env (for runtime OpenCV libraries)
-
-**NOTE**: On macOS, `DYLD_LIBRARY_PATH` must be passed inline (cannot be set persistently due to SIP).
-
-### Static OpenCV Linking
-
-For self-contained binaries with zero runtime dependencies:
-
-```bash
-# 1. Build minimal OpenCV (4.12, core+imgproc, ~5-10 min)
-./scripts/build_opencv_static.sh
-
-# 2. Build Sinter statically
-bash -c 'export DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib:$DYLD_LIBRARY_PATH && source scripts/setup_static_opencv.sh && maturin develop --release --features "python,opencv-static"'
-
-# 3. Verify no OpenCV runtime dependencies
-otool -L /path/to/sinter.so | grep opencv  # Should return nothing
-```
-
-**Trade-offs**: No runtime deps | Portable | 5-10 min build | ~10MB larger
+Sinter is **100% pure Rust + SIMD**. All operations (including MedianBlur, GaussianBlur, Sharpen, Emboss, EdgeDetection, HSV, and Affine) are natively implemented and vectorized with zero C++ dependencies.
 
 Run Python tests (quiet):
 ```bash
@@ -123,16 +85,15 @@ pip install numpy pytest
 pytest python/tests/ -q 2>&1 | grep -E "(PASSED|FAILED|ERROR|test_|===)"
 ```
 
-Run Python benchmarks (ALWAYS use --release build WITH opencv):
+Run Python benchmarks:
 ```bash
-# First rebuild with --release AND opencv
-maturin develop --release --features "python,opencv"
+# Rebuild release wheel
+maturin develop --release --features "python"
 
-# Then run benchmarks
-python python/tests/benchmark_fair_v1_v2.py
+# Run benchmarks
+python python/benchmarks/benchmark_individual.py
+python python/benchmarks/benchmark_fusion.py
 ```
-
-**WARNING**: Running benchmarks without the opencv feature will show **misleading results** - Affine will appear 4x slower when it's actually just using the Rust fallback!
 
 Python usage:
 ```python

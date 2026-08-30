@@ -346,7 +346,7 @@ impl Executable for SampledImageOp {
                 border_mode,
             } => {
                 use crate::transforms::geometric::affine::{
-                    AffineBorderMode, AffineInterpolation, AffineParams,
+                    AffineBorderMode, AffineInterpolation,
                 };
                 let affine_interp = match interpolation {
                     Interpolation::Nearest => AffineInterpolation::Nearest,
@@ -363,12 +363,7 @@ impl Executable for SampledImageOp {
                     crate::sampled_ir::ops::BorderMode::Replicate => AffineBorderMode::Replicate,
                     crate::sampled_ir::ops::BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
-                let params = AffineParams {
-                    scale: (matrix[0].abs(), matrix[3].abs()),
-                    rotate: 0.0,
-                    translate: (matrix[4], matrix[5]),
-                    shear: (0.0, 0.0),
-                };
+                let params = crate::sampled_ir::ops::affine_params_from_matrix(*matrix);
                 Affine::with_all(
                     params,
                     image.width,
@@ -450,6 +445,7 @@ impl Executable for SampledImageOp {
 mod tests {
     use super::*;
     use crate::sampled_ir::ops::RotateAngle;
+    use crate::core::FusableImage;
 
     #[test]
     fn test_brightness_access_and_shape() {
@@ -480,6 +476,42 @@ mod tests {
         for op in ops {
             assert_eq!(op.reorder_rule(), ReorderRule::CommutesWithGeometry);
         }
+    }
+
+    #[test]
+    fn test_affine_identity_op_exact_path() {
+        // Exact path used by Python Compose.apply: SampledImageOp::Affine -> execute
+        use crate::sampled_ir::ops::{BorderMode, Interpolation};
+        let w = 8;
+        let h = 8;
+        let mut data = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x as u8).wrapping_mul(16).wrapping_add(y as u8));
+            }
+        }
+        let mut img = FusableImage::new(&mut data, w, h, 1);
+
+        let op = SampledImageOp::Affine {
+            matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            interpolation: Interpolation::Bilinear,
+            border_mode: BorderMode::Constant { value: 0 },
+        };
+        let barrier = op.execute(&mut img).unwrap();
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for (i, (&got, &expected)) in barrier.data.iter().zip(data.iter()).enumerate() {
+            let diff = (got as i32 - expected as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 8 {
+                    eprintln!("  idx={} (x={}, y={}): got={} expected={}", i, i % w, i / w, got, expected);
+                }
+            }
+        }
+        assert_eq!(mismatches, 0, "SampledImageOp identity: {} mismatches, max_diff={}", mismatches, max_diff);
     }
 
     #[test]

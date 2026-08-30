@@ -11,8 +11,6 @@
 // - Automatic algorithm selection
 
 pub mod kernel;
-#[cfg(feature = "opencv")]
-mod opencv;
 
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
 
@@ -100,24 +98,8 @@ impl Transform for GaussianBlurSigma {
 
 impl Executable for GaussianBlurSigma {
     fn execute(&self, image: &mut FusableImage) -> Option<crate::core::BarrierImage> {
-        #[cfg(feature = "opencv")]
-        {
-            // Use OpenCV's optimized Gaussian blur
-            match opencv::execute_opencv(image, self.sigma, self.sigma) {
-                Ok(_) => return None,
-                Err(_) => {
-                    // Fall back to Rust implementation on error
-                    gaussian_dispatch(image, self.sigma, self.quality);
-                    return None;
-                }
-            }
-        }
-
-        #[cfg(not(feature = "opencv"))]
-        {
-            gaussian_dispatch(image, self.sigma, self.quality);
-            None
-        }
+        gaussian_dispatch(image, self.sigma, self.quality);
+        None
     }
 }
 
@@ -257,21 +239,7 @@ mod tests {
         assert_eq!(gb.quality, BlurQuality::Exact);
     }
 
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_gaussian_blur_sigma_opencv_constant() {
-        // Test that OpenCV backend preserves constant images
-        let mut data = vec![128u8; 512 * 512 * 3];
-        let mut img = FusableImage::new(&mut data, 512, 512, 3);
 
-        let result = GaussianBlurSigma::new(2.0).execute(&mut img);
-
-        // OpenCV should preserve constant images exactly
-        assert!(
-            img.data.iter().all(|&p| p == 128),
-            "OpenCV backend failed to preserve constant image"
-        );
-    }
 
     #[test]
     fn test_gaussian_blur_sigma_default() {

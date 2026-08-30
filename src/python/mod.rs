@@ -65,21 +65,9 @@ use sampled::PySampledImageProgram;
 #[cfg(feature = "python")]
 use tensor::apply_to_tensor_inplace;
 
-/// Initialize OpenCV to run single-threaded for consistent benchmarking
-#[cfg(feature = "opencv")]
-fn init_opencv_single_threaded() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = opencv::core::set_num_threads(1);
-    });
-}
-
 /// Python module for sinter
 #[pymodule]
 fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
-    #[cfg(feature = "opencv")]
-    init_opencv_single_threaded();
 
     // Distribution types
     register_classes!(
@@ -175,33 +163,5 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
     // PyTorch integration
     m.add_function(wrap_pyfunction!(apply_to_tensor_inplace, m)?)?;
 
-    // OpenCV control
-    #[cfg(feature = "opencv")]
-    {
-        m.add_function(wrap_pyfunction!(set_opencv_num_threads, m)?)?;
-        m.add_function(wrap_pyfunction!(get_opencv_num_threads, m)?)?;
-    }
-
     Ok(())
-}
-
-/// Set the number of threads OpenCV uses
-#[cfg(feature = "opencv")]
-#[pyfunction]
-fn set_opencv_num_threads(_py: Python, num: i32) -> PyResult<()> {
-    opencv::core::set_num_threads(num);
-    Ok(())
-}
-
-/// Get the number of threads OpenCV is configured to use
-#[cfg(feature = "opencv")]
-#[pyfunction]
-fn get_opencv_num_threads(_py: Python) -> PyResult<i32> {
-    match opencv::core::get_num_threads() {
-        Ok(threads) => Ok(threads),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to get OpenCV num threads: {}",
-            e
-        ))),
-    }
 }

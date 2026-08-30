@@ -254,21 +254,18 @@ The only dependency is `numpy>=1.20`. OpenCV is statically linked.
 
 To build from source or contribute, you'll need:
 
-- Rust toolchain (1.70+)
+- Rust toolchain (1.75+)
 - maturin
-- conda opencv (or building opencv from source for static linking)
-- Xcode toolchain (on macOS)
 
 ```bash
 # Install build dependencies
 pip install maturin
 
-# Build with OpenCV feature (macOS ARM64)
-export DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib:$DYLD_LIBRARY_PATH
-maturin develop --release --features "python,opencv"
+# Build and install development wheel
+maturin develop --release --features "python"
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for build details and OpenCV integration.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for architectural details and IR design.
 
 ---
 

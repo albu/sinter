@@ -6,6 +6,61 @@
 use crate::core::{AccessPattern, ShapeEffect};
 use serde::{Deserialize, Serialize};
 
+/// Reconstruct core `AffineParams` from the sampled inverse-mapping matrix.
+///
+/// The sampled matrix is `[a, b, c, d, e, f]` describing the INVERSE mapping
+/// used for backward resampling:
+///
+/// ```text
+/// x_in = a*x_out + b*y_out + c
+/// y_in = d*x_out + e*y_out + f
+/// ```
+///
+/// The core `Affine` stores FORWARD parameters (scale, rotate, translate) and
+/// rebuilds the inverse matrix itself. To round-trip exactly we invert the
+/// linear part `A = [[a, b], [d, e]]` and extract scale / rotation / translation
+/// using the same conventions as `build_inverse_matrix` (forward
+/// `F = [[sx*cos, -sy*sin], [sx*sin, sy*cos]]`, translation applied as
+/// `c = -(a*tx + d*ty)`, `f = -(b*tx + e*ty)`).
+pub(crate) fn affine_params_from_matrix(
+    matrix: [f32; 6],
+) -> crate::transforms::geometric::affine::AffineParams {
+    let a = matrix[0];
+    let b = matrix[1];
+    let c = matrix[2];
+    let d = matrix[3];
+    let e = matrix[4];
+    let f = matrix[5];
+
+    let det = a * e - b * d;
+    if det.abs() < 1e-9 {
+        // Degenerate (singular) matrix: fall back to identity-like parameters.
+        return crate::transforms::geometric::affine::AffineParams::default();
+    }
+
+    // Forward linear map F = A^-1.
+    let fwd_a = e / det;
+    let fwd_b = -b / det;
+    let fwd_d = -d / det;
+    let fwd_e = a / det;
+
+    // Core forward convention: [[sx*cos, -sy*sin], [sx*sin, sy*cos]].
+    let sx = (fwd_a * fwd_a + fwd_d * fwd_d).sqrt();
+    let sy = (fwd_b * fwd_b + fwd_e * fwd_e).sqrt();
+    let rotate = fwd_d.atan2(fwd_a).to_degrees();
+
+    // Recover forward translation by inverting c = -(a*tx + d*ty), f = -(b*tx + e*ty).
+    let tx = (-c * e + d * f) / det;
+    let ty = (-a * f + c * b) / det;
+
+    crate::transforms::geometric::affine::AffineParams {
+        scale: (sx, sy),
+        rotate,
+        translate: (tx, ty),
+        shear: (0.0, 0.0),
+    }
+}
+
 /// Deterministic image transform (sampled, no randomness)
 ///
 /// This enum represents a SINGLE transform with ALL parameters
@@ -368,7 +423,7 @@ impl SampledImageOp {
                 border_mode,
             } => {
                 use crate::transforms::geometric::affine::{
-                    AffineBorderMode, AffineInterpolation, AffineParams,
+                    AffineBorderMode, AffineInterpolation,
                 };
                 let affine_interp = match interpolation {
                     Interpolation::Nearest => AffineInterpolation::Nearest,
@@ -382,16 +437,9 @@ impl SampledImageOp {
                     BorderMode::Replicate => AffineBorderMode::Replicate,
                     BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
-                // Matrix is [a, b, c, d, e, f]
-                // For AffineParams reconstruction, we approximate:
-                // scale_x = abs(a), scale_y = abs(e)
-                // translate_x = c, translate_y = f
-                let params = AffineParams {
-                    scale: (matrix[0].abs(), matrix[3].abs()),
-                    rotate: 0.0,
-                    translate: (matrix[4], matrix[5]), // Indices 4, 5 are translation (e, f in col-major)
-                    shear: (0.0, 0.0),
-                };
+                // Matrix is [a, b, c, d, e, f] (inverse mapping).
+                // Recover forward scale/rotation/translation exactly.
+                let params = crate::sampled_ir::ops::affine_params_from_matrix(*matrix);
                 Some(Box::new(Affine::with_all(
                     params,
                     0,

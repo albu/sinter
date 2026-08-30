@@ -4,12 +4,11 @@ FROM rust:1.75-slim-bookworm
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv \
-    pkg-config libopencv-dev clang \
-    cmake git curl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up python environment and install maturin
-RUN pip3 install --break-system-packages maturin numpy pytest opencv-python-headless
+RUN pip3 install --break-system-packages maturin numpy pytest
 
 # Set working directory
 WORKDIR /app
@@ -17,8 +16,8 @@ WORKDIR /app
 # Copy the entire project
 COPY . .
 
-# Build in release mode with all features
-RUN maturin develop --release --features "python,opencv"
+# Build in release mode
+RUN maturin develop --release --features "python"
 
 # Entrypoint script to run benchmarks
 ENTRYPOINT ["python3"]
