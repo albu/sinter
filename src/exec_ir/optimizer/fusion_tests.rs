@@ -338,7 +338,13 @@ fn test_long_fused_pipeline_output_correctness() {
     let mut d1 = base.clone();
     let mut img_fused = FusableImage::new(&mut d1, 64, 64, 3);
     let barrier = exec_plan.execute(&mut img_fused);
-    assert!(barrier.is_none(), "all-in-place pipeline should not emit a barrier");
+    // The trailing HorizontalFlip + VerticalFlip fuse to Rot180, which now
+    // delegates to the out-of-place NEON Rotate path, so the plan may emit a
+    // barrier even though every individual op is in-place.
+    let fused_data: &[u8] = match &barrier {
+        Some(b) => &b.data,
+        None => &img_fused.data,
+    };
 
     // Sequential application of the same ops.
     let mut d2 = base.clone();
@@ -347,8 +353,7 @@ fn test_long_fused_pipeline_output_correctness() {
         Executable::execute(op, &mut img_seq);
     }
 
-    let max_diff = img_fused
-        .data
+    let max_diff = fused_data
         .iter()
         .zip(img_seq.data.iter())
         .map(|(a, b)| (*a as i32 - *b as i32).abs())
@@ -363,9 +368,13 @@ fn test_long_fused_pipeline_output_correctness() {
     // Determinism: replaying the optimized plan yields identical output.
     let mut d3 = base.clone();
     let mut img_replay = FusableImage::new(&mut d3, 64, 64, 3);
-    exec_plan.execute(&mut img_replay);
+    let replay_barrier = exec_plan.execute(&mut img_replay);
+    let replay_data: &[u8] = match &replay_barrier {
+        Some(b) => &b.data,
+        None => &img_replay.data,
+    };
     assert_eq!(
-        img_fused.data, img_replay.data,
+        fused_data, replay_data,
         "optimized plan must be deterministic on replay"
     );
 }

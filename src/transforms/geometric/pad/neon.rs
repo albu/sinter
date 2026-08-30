@@ -104,15 +104,60 @@ unsafe fn copy_row_neon(
         .copy_from_slice(&src[src_start..src_start + byte_count]);
 }
 
-/// Pad with reflection (optimized with NEON SIMD for grayscale)
-///
-/// Region-based approach:
-/// 1. Center region: Direct memcpy (262,144 pixels for 512->532)
-/// 2. Edge regions: SIMD row-based copies (20,480 pixels for 10px pad)
-/// 3. Corner regions: Small scalar fallback (400 pixels for 10px pad)
-///
-/// This reduces complexity from O(WxH) per-pixel to O(W+H) bulk copies.
+/// Reverse-copy `n` bytes: `dst[i] = src[n - 1 - i]`, using vrev64q on 16-byte
+/// chunks and a scalar tail.
 #[cfg(target_arch = "aarch64")]
+unsafe fn reverse_bytes_neon(dst: *mut u8, src: *const u8, n: usize) {
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let chunk = vld1q_u8(src.add(i));
+        let rev64 = vrev64q_u8(chunk);
+        let rev = vcombine_u8(vget_high_u8(rev64), vget_low_u8(rev64));
+        vst1q_u8(dst.add(n - i - 16), rev);
+        i += 16;
+    }
+    while i < n {
+        *dst.add(n - 1 - i) = *src.add(i);
+        i += 1;
+    }
+}
+
+/// Fill `n` bytes at `dst` with `val` using NEON.
+#[cfg(target_arch = "aarch64")]
+unsafe fn fill_run_neon_ptr(dst: *mut u8, n: usize, val: u8) {
+    if n == 0 {
+        return;
+    }
+    let fill_vec = vdupq_n_u8(val);
+    let mut i = 0usize;
+    while i + 16 <= n {
+        vst1q_u8(dst.add(i), fill_vec);
+        i += 16;
+    }
+    while i < n {
+        *dst.add(i) = val;
+        i += 1;
+    }
+}
+
+/// Pad with reflection (NEON-accelerated for grayscale)
+///
+/// Per output row:
+/// - Left edge: reversed copy of the source row's first `left` pixels
+///   (edge-saturated when `left` exceeds the source width)
+/// - Center: direct memcpy of the reflected source row
+/// - Right edge: reversed copy of the source row's last `right` pixels
+///   (edge-saturated when `right` exceeds the source width)
+///
+/// The horizontal reflect mapping is `dst[x] = src[reflect(x)]` where
+/// reflect() mirrors around the border pixels (-1 maps to 0, matching
+/// `pad_fast_slice`'s Reflect map_coord exactly). When the border is no larger
+/// than the source dimension the edge is a pure byte reversal of a contiguous
+/// run (vrev64q); when the border exceeds the dimension the overflow saturates
+/// at the edge pixel (memset) followed by the reversed run.
+///
+/// Only channels == 1 is routed here today; any other channel count defers to
+/// the scalar reference so semantics stay correct for all inputs.
 #[cfg(target_arch = "aarch64")]
 pub fn pad_reflect_neon(
     dst: &mut [u8],
@@ -125,14 +170,18 @@ pub fn pad_reflect_neon(
     left: usize,
     channels: usize,
 ) {
+    if channels != 1 {
+        super::pad_reflect_scalar(
+            dst, src, new_width, src_width, src_height, top, left, channels,
+        );
+        return;
+    }
+
     let src_stride = src_width * channels;
     let dst_stride = new_width * channels;
 
-    // Helper: Reflect coordinate
-    // p: coordinate in padded area (0..new_dim)
-    // border: border size (top or left)
-    // size: original image size
-    let reflect_coord = |p: i32, border: usize, size: usize| -> usize {
+    // Reflect coordinate in the vertical direction (row mapping).
+    let reflect_row = |p: i32, border: usize, size: usize| -> usize {
         let val = p - border as i32;
         if val < 0 {
             (-val - 1).clamp(0, size as i32 - 1) as usize
@@ -143,51 +192,59 @@ pub fn pad_reflect_neon(
         }
     };
 
-    // 1. Iterate over all destination rows
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
+    let left_bytes = left * channels;
+    let right_bytes = (new_width - left - src_width) * channels;
+
     for y in 0..new_height {
-        let src_y = reflect_coord(y as i32, top, src_height);
-        let src_row_offset = src_y * src_stride;
-        let dst_row_offset = y * dst_stride;
+        let src_y = reflect_row(y as i32, top, src_height);
+        let s_row = unsafe { src_ptr.add(src_y * src_stride) };
+        let d_row = unsafe { dst_ptr.add(y * dst_stride) };
 
-        // 2. Iterate over destination columns
-        // Optimized:
-        // - Left pad: scalar reflect
-        // - Center: direct copy (SIMD)
-        // - Right pad: scalar reflect
-
-        // Left Padding
-        for x in 0..left {
-            let src_x = reflect_coord(x as i32, left, src_width);
-            let src_idx = src_row_offset + src_x * channels;
-            let dst_idx = dst_row_offset + x * channels;
-            dst[dst_idx..dst_idx + channels].copy_from_slice(&src[src_idx..src_idx + channels]);
+        // Left edge: dst[0..left] = reflect(src[0..left])
+        if left_bytes > 0 {
+            if left <= src_width {
+                unsafe { reverse_bytes_neon(d_row, s_row, left_bytes) };
+            } else {
+                // Saturate: [src[iw-1]] * (left - iw), then the reversed full row.
+                let sat_px = left - src_width;
+                unsafe {
+                    fill_run_neon_ptr(
+                        d_row,
+                        sat_px * channels,
+                        *s_row.add((src_width - 1) * channels),
+                    );
+                    reverse_bytes_neon(d_row.add(sat_px * channels), s_row, src_stride);
+                }
+            }
         }
 
-        // Center Region (Image width)
-        // If we are in the vertical padding region (y < top or y >= top+height),
-        // we are reflecting a source row.
-        // If we are in the center vertical region, we are copying the source row directly.
-        // In BOTH cases, the "center" part of the row is a contiguous copy of SOME source row.
-        // So we can always use SIMD copy for the middle width.
-        let dst_center_start = dst_row_offset + left * channels;
-        // src_y is already calculated correctly for reflection
+        // Center: copy the reflected source row.
         unsafe {
-            copy_row_neon(
-                dst,
-                src,
-                dst_center_start,
-                src_row_offset, // This is the start of the reflected source row
-                src_width,
-                channels,
-            );
+            std::ptr::copy_nonoverlapping(s_row, d_row.add(left_bytes), src_stride);
         }
 
-        // Right Padding
-        for x in left + src_width..new_width {
-            let src_x = reflect_coord(x as i32, left, src_width);
-            let src_idx = src_row_offset + src_x * channels;
-            let dst_idx = dst_row_offset + x * channels;
-            dst[dst_idx..dst_idx + channels].copy_from_slice(&src[src_idx..src_idx + channels]);
+        // Right edge: dst[left + iw ..] = reflect(src[iw - right .. iw])
+        if right_bytes > 0 {
+            let d_edge = unsafe { d_row.add(left_bytes + src_stride) };
+            if right_bytes <= src_stride {
+                unsafe {
+                    reverse_bytes_neon(
+                        d_edge,
+                        s_row.add(src_stride - right_bytes),
+                        right_bytes,
+                    );
+                }
+            } else {
+                // Saturate: reversed full row, then [src[0]] * (right - iw).
+                let sat_px = right_bytes - src_stride;
+                unsafe {
+                    reverse_bytes_neon(d_edge, s_row, src_stride);
+                    fill_run_neon_ptr(d_edge.add(src_stride), sat_px, *s_row);
+                }
+            }
         }
     }
 }
