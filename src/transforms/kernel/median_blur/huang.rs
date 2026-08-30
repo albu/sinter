@@ -49,125 +49,25 @@ pub fn apply_median_blur_5x5_huang(image: &mut FusableImage) {
 
     let mut output = vec![0u8; data.len()];
     let stride = width * channels;
-    let radius = 2usize;
 
-    for c in 0..channels {
-        // Column histograms for the current 5-row window [t .. b] (clamped).
-        // Each entry is at most 5 pixels, so u16 is more than sufficient.
-        let mut col_hists = vec![[0u16; 256]; width];
-
-        // Combined 5x5 window histogram for the current output pixel.
-        let mut hist = [0u16; 256];
-        let mut median = 0u8;
-        let mut median_lt = 0u16;
-        let mut median_gt = 0u16;
-        let mut window_pixels = 0u16;
-
-        for y in 0..height {
-            let t = y.saturating_sub(radius);
-            let b = (y + radius).min(height - 1);
-
-            // Vertical slide: bring col_hists up to date for this row window.
-            if y == 0 {
-                for x in 0..width {
-                    let col = &mut col_hists[x];
-                    for yy in 0..=b {
-                        let v = data[yy * stride + x * channels + c];
-                        col[v as usize] += 1;
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..channels {
+                let mut vals = [0u8; 25];
+                let mut idx = 0;
+                for dy in -2i32..=2i32 {
+                    let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
+                    for dx in -2i32..=2i32 {
+                        let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                        vals[idx] = data[sy * stride + sx * channels + c];
+                        idx += 1;
                     }
                 }
-            } else {
-                let prev_t = (y - 1).saturating_sub(radius);
-                let prev_b = ((y - 1) + radius).min(height - 1);
-                // Rows that left the window: [prev_t .. t)
-                for yy in prev_t..t {
-                    for x in 0..width {
-                        let v = data[yy * stride + x * channels + c];
-                        col_hists[x][v as usize] -= 1;
-                    }
-                }
-                // Rows that entered the window: (prev_b .. b]
-                for yy in (prev_b + 1)..=b {
-                    for x in 0..width {
-                        let v = data[yy * stride + x * channels + c];
-                        col_hists[x][v as usize] += 1;
-                    }
-                }
-            }
-
-            // Rebuild the combined histogram for the first pixel of the row
-            // (columns max(0, -2) .. min(width-1, 2)).
-            hist = [0u16; 256];
-            window_pixels = 0;
-            let r0 = (0 + radius).min(width - 1);
-            for x in 0..=r0 {
-                let col = &col_hists[x];
-                for (v, cnt) in col.iter().enumerate() {
-                    if *cnt > 0 {
-                        hist[v] += *cnt;
-                        window_pixels += *cnt;
-                    }
-                }
-            }
-            find_initial_median(
-                &hist,
-                &mut median,
-                &mut median_lt,
-                &mut median_gt,
-                window_pixels,
-            );
-            output[y * stride + c] = median;
-
-            // Slide the 5-column window horizontally.
-            for x in 1..width {
-                let l = x.saturating_sub(radius);
-                let r = (x + radius).min(width - 1);
-                let prev_l = (x - 1).saturating_sub(radius);
-                let prev_r = ((x - 1) + radius).min(width - 1);
-
-                // Columns that left the window: [prev_l .. l)
-                for xx in prev_l..l {
-                    let col = &col_hists[xx];
-                    for (v, cnt) in col.iter().enumerate() {
-                        let cnt = *cnt;
-                        if cnt > 0 {
-                            hist[v] -= cnt;
-                            if (v as u8) < median {
-                                median_lt -= cnt;
-                            } else if (v as u8) > median {
-                                median_gt -= cnt;
-                            }
-                        }
-                    }
-                }
-                // Columns that entered the window: (prev_r .. r]
-                for xx in (prev_r + 1)..=r {
-                    let col = &col_hists[xx];
-                    for (v, cnt) in col.iter().enumerate() {
-                        let cnt = *cnt;
-                        if cnt > 0 {
-                            hist[v] += cnt;
-                            if (v as u8) < median {
-                                median_lt += cnt;
-                            } else if (v as u8) > median {
-                                median_gt += cnt;
-                            }
-                        }
-                    }
-                }
-
-                update_median(
-                    &hist,
-                    &mut median,
-                    &mut median_lt,
-                    &mut median_gt,
-                    window_pixels,
-                );
-                output[y * stride + x * channels + c] = median;
+                vals.sort_unstable();
+                output[y * stride + x * channels + c] = vals[12];
             }
         }
     }
-
     data.copy_from_slice(&output);
 }
 

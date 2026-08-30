@@ -108,6 +108,31 @@ impl Executable for HueSaturationValue {
             return None;
         }
 
+        if self.hue_shift == 0.0 && image.channels == 3 {
+            let s = self.sat_scale;
+            let v = self.val_scale;
+            let om_s = 1.0 - s;
+            let r_r = (om_s * 0.299 + s) * v;
+            let r_g = (om_s * 0.587) * v;
+            let r_b = (om_s * 0.114) * v;
+
+            let g_r = (om_s * 0.299) * v;
+            let g_g = (om_s * 0.587 + s) * v;
+            let g_b = (om_s * 0.114) * v;
+
+            let b_r = (om_s * 0.299) * v;
+            let b_g = (om_s * 0.587) * v;
+            let b_b = (om_s * 0.114 + s) * v;
+
+            let matrix = [
+                [r_r, r_g, r_b],
+                [g_r, g_g, g_b],
+                [b_r, b_g, b_b],
+            ];
+            crate::transforms::runtime::matrix::MatrixExecutor::apply(image, &matrix);
+            return None;
+        }
+
         // Use SIMD implementation (with scalar fallback for non-RGB images)
         execute_fast_simd(self, image);
         None

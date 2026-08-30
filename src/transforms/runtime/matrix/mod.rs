@@ -109,25 +109,5 @@ pub fn apply_matrix(image: &mut FusableImage, matrix: &[[f32; 3]; 3]) {
         image.channels, 3,
         "Matrix transforms only work with RGB images (3 channels)"
     );
-
-    let width = image.width;
-    let height = image.height;
-    let data = &mut image.data;
-
-    for i in 0..(width * height) {
-        let idx = i * 3;
-        let r = data[idx] as f32;
-        let g = data[idx + 1] as f32;
-        let b = data[idx + 2] as f32;
-
-        // Apply matrix: out = M * in
-        let out_r = matrix[0][0] * r + matrix[0][1] * g + matrix[0][2] * b;
-        let out_g = matrix[1][0] * r + matrix[1][1] * g + matrix[1][2] * b;
-        let out_b = matrix[2][0] * r + matrix[2][1] * g + matrix[2][2] * b;
-
-        // Clamp to [0, 255] and convert back
-        data[idx] = out_r.clamp(0.0, 255.0) as u8;
-        data[idx + 1] = out_g.clamp(0.0, 255.0) as u8;
-        data[idx + 2] = out_b.clamp(0.0, 255.0) as u8;
-    }
+    MatrixExecutor::apply(image, matrix);
 }

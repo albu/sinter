@@ -113,6 +113,15 @@ unsafe fn pack_f32_to_u8(
     vcombine_u8(vqmovn_u16(u16_0), vqmovn_u16(u16_1))
 }
 
+#[inline(always)]
+unsafe fn vrecip(v: float32x4_t) -> float32x4_t {
+    let est = vrecpeq_f32(v);
+    let step = vrecpsq_f32(v, est);
+    let est2 = vmulq_f32(est, step);
+    let step2 = vrecpsq_f32(v, est2);
+    vmulq_f32(est2, step2)
+}
+
 /// Process a batch of 4 pixels (in float32)
 #[inline(always)]
 unsafe fn process_batch(
@@ -123,6 +132,9 @@ unsafe fn process_batch(
     s_scale: float32x4_t,
     v_scale: float32x4_t,
 ) -> (float32x4_t, float32x4_t, float32x4_t) {
+    const INV_255: f32 = 1.0 / 255.0;
+    const INV_60: f32 = 1.0 / 60.0;
+
     let zeroes = vdupq_n_f32(0.0);
     let ones = vdupq_n_f32(1.0);
     let two_five_five = vdupq_n_f32(255.0);
@@ -140,23 +152,17 @@ unsafe fn process_batch(
     // Saturation (0..255)
     // S = (Delta * 255) / Max
     let max_gt_0 = vcgtq_f32(max, zeroes);
-    // Use div, mask result. Only safe if we don't trap on div by zero.
-    // NEON fdiv by zero gives Inf. Is masked out later.
-    let s_val = vdivq_f32(vmulq_f32(delta, two_five_five), max);
+    let inv_max = vrecip(max);
+    let s_val = vmulq_f32(vmulq_f32(delta, two_five_five), inv_max);
     let s_old = vbslq_f32(max_gt_0, s_val, zeroes);
 
     // Hue (0..360)
     let delta_is_zero = vceqq_f32(delta, zeroes);
-    let inv_delta = vdivq_f32(ones, delta);
+    let inv_delta = vrecip(delta);
 
     // Terms for Hue calculation
     let max_is_r = vceqq_f32(max, r);
     let max_is_g = vceqq_f32(max, g);
-    // max_is_b is implicit
-
-    // If Max == R: (G - B) / Delta
-    // If Max == G: (B - R) / Delta + 2
-    // If Max == B: (R - G) / Delta + 4
 
     // Compute all terms
     let term_r = vmulq_f32(vsubq_f32(g, b), inv_delta);
@@ -194,13 +200,13 @@ unsafe fn process_batch(
     // --- HSV to RGB ---
 
     // C = V * S / 255
-    let c = vdivq_f32(vmulq_f32(v_final, s_final), two_five_five);
+    let c = vmulq_n_f32(vmulq_f32(v_final, s_final), INV_255);
 
     // m = V - C
     let m = vsubq_f32(v_final, c);
 
     // X = C * (1 - abs((H / 60) % 2 - 1))
-    let hp = vdivq_f32(h_final, sixty);
+    let hp = vmulq_n_f32(h_final, INV_60);
 
     // hp % 2
     let hp_half = vmulq_n_f32(hp, 0.5);

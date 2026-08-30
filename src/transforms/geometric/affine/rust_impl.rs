@@ -68,11 +68,15 @@ pub(super) fn execute_rust(affine: &Affine, image: &FusableImage) -> BarrierImag
             let dy_fp = (d * 65536.0).round() as i64;
 
             if channels == 3 {
-                // Specialized fast path for 3-channel (RGB) images
+                let in_stride = in_width * 3;
+                let in_ptr = data.as_ptr();
+                let out_ptr = transformed_data.as_mut_ptr();
+                let max_x = in_width.saturating_sub(1) as u32;
+                let max_y = in_height.saturating_sub(1) as u32;
+
                 for y_out in 0..out_height {
                     let mut x_fp = ((b * y_out as f32 + c) * 65536.0).round() as i64;
                     let mut y_fp = ((e * y_out as f32 + f) * 65536.0).round() as i64;
-
                     let row_out_idx = y_out * out_width * 3;
 
                     for x_out in 0..out_width {
@@ -88,37 +92,36 @@ pub(super) fn execute_rust(affine: &Affine, image: &FusableImage) -> BarrierImag
 
                         let out_idx = row_out_idx + x_out * 3;
 
-                        if x0 >= 0 && x0 + 1 < in_width as i32 && y0 >= 0 && y0 + 1 < in_height as i32 {
-                            let idx00 = (y0 as usize * in_width + x0 as usize) * 3;
-                            let idx01 = idx00 + in_width * 3;
-                            let idx10 = idx00 + 3;
-                            let idx11 = idx01 + 3;
+                        if (x0 as u32) < max_x && (y0 as u32) < max_y {
+                            unsafe {
+                                let top_ptr = in_ptr.add(y0 as usize * in_stride + x0 as usize * 3);
+                                let bot_ptr = top_ptr.add(in_stride);
 
-                            let r00 = data[idx00] as u32;
-                            let g00 = data[idx00 + 1] as u32;
-                            let b00 = data[idx00 + 2] as u32;
+                                let r00 = *top_ptr as u32;
+                                let g00 = *top_ptr.add(1) as u32;
+                                let b00 = *top_ptr.add(2) as u32;
 
-                            let r10 = data[idx10] as u32;
-                            let g10 = data[idx10 + 1] as u32;
-                            let b10 = data[idx10 + 2] as u32;
+                                let r10 = *top_ptr.add(3) as u32;
+                                let g10 = *top_ptr.add(4) as u32;
+                                let b10 = *top_ptr.add(5) as u32;
 
-                            let r01 = data[idx01] as u32;
-                            let g01 = data[idx01 + 1] as u32;
-                            let b01 = data[idx01 + 2] as u32;
+                                let r01 = *bot_ptr as u32;
+                                let g01 = *bot_ptr.add(1) as u32;
+                                let b01 = *bot_ptr.add(2) as u32;
 
-                            let r11 = data[idx11] as u32;
-                            let g11 = data[idx11 + 1] as u32;
-                            let b11 = data[idx11 + 2] as u32;
+                                let r11 = *bot_ptr.add(3) as u32;
+                                let g11 = *bot_ptr.add(4) as u32;
+                                let b11 = *bot_ptr.add(5) as u32;
 
-                            let r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11 + 32768) >> 16;
-                            let g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11 + 32768) >> 16;
-                            let b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11 + 32768) >> 16;
+                                let r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11 + 32768) >> 16;
+                                let g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11 + 32768) >> 16;
+                                let b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11 + 32768) >> 16;
 
-                            transformed_data[out_idx] = r as u8;
-                            transformed_data[out_idx + 1] = g as u8;
-                            transformed_data[out_idx + 2] = b as u8;
+                                *out_ptr.add(out_idx) = r as u8;
+                                *out_ptr.add(out_idx + 1) = g as u8;
+                                *out_ptr.add(out_idx + 2) = b as u8;
+                            }
                         } else {
-                            // Fast 3-channel border sampling
                             let (r00, g00, b00) = sample_rgb(data, in_width as i32, in_height as i32, x0, y0, affine.border_mode);
                             let (r10, g10, b10) = sample_rgb(data, in_width as i32, in_height as i32, x0 + 1, y0, affine.border_mode);
                             let (r01, g01, b01) = sample_rgb(data, in_width as i32, in_height as i32, x0, y0 + 1, affine.border_mode);
@@ -128,9 +131,11 @@ pub(super) fn execute_rust(affine: &Affine, image: &FusableImage) -> BarrierImag
                             let g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11 + 32768) >> 16;
                             let b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11 + 32768) >> 16;
 
-                            transformed_data[out_idx] = r.min(255) as u8;
-                            transformed_data[out_idx + 1] = g.min(255) as u8;
-                            transformed_data[out_idx + 2] = b.min(255) as u8;
+                            unsafe {
+                                *out_ptr.add(out_idx) = r.min(255) as u8;
+                                *out_ptr.add(out_idx + 1) = g.min(255) as u8;
+                                *out_ptr.add(out_idx + 2) = b.min(255) as u8;
+                            }
                         }
 
                         x_fp += dx_fp;
