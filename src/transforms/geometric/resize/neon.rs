@@ -57,14 +57,21 @@ fn resize_nearest(
     channels: usize,
 ) {
     unsafe {
-        // Use SIMD for beneficial image sizes with RGB or grayscale
         #[cfg(target_arch = "aarch64")]
         if dst_width >= SIMD_MIN_WIDTH && dst_height >= SIMD_MIN_HEIGHT {
-            if channels == 3 {
-                resize_nearest_rgb_neon(src, dst, src_width, src_height, dst_width, dst_height);
-                return;
-            } else if channels == 1 {
+            if channels == 1 {
+                if src_width == dst_width * 2 && src_height == dst_height * 2 {
+                    resize_nearest_down2_gray_neon(src, dst, src_width, src_height, dst_width, dst_height);
+                    return;
+                }
                 resize_nearest_gray_neon(src, dst, src_width, src_height, dst_width, dst_height);
+                return;
+            } else if channels == 3 {
+                if src_width == dst_width * 2 && src_height == dst_height * 2 {
+                    resize_nearest_down2_rgb_neon(src, dst, src_width, src_height, dst_width, dst_height);
+                    return;
+                }
+                resize_nearest_rgb_neon(src, dst, src_width, src_height, dst_width, dst_height);
                 return;
             }
         }
@@ -72,6 +79,89 @@ fn resize_nearest(
         resize_nearest_scalar(
             src, dst, src_width, src_height, dst_width, dst_height, channels,
         );
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn resize_nearest_down2_gray_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    src_width: usize,
+    _src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) {
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let src_stride = src_width;
+    let dst_stride = dst_width;
+
+    for y in 0..dst_height {
+        let s_row = src_ptr.add(y * 2 * src_stride);
+        let d_row = dst_ptr.add(y * dst_stride);
+        let mut x = 0;
+        while x + 16 <= dst_width {
+            let pair = vld2q_u8(s_row.add(x * 2));
+            vst1q_u8(d_row.add(x), pair.0);
+            x += 16;
+        }
+        while x < dst_width {
+            *d_row.add(x) = *s_row.add(x * 2);
+            x += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn resize_nearest_down2_rgb_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    src_width: usize,
+    _src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) {
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let src_stride = src_width * 3;
+    let dst_stride = dst_width * 3;
+
+    for y in 0..dst_height {
+        let s_row = src_ptr.add(y * 2 * src_stride);
+        let d_row = dst_ptr.add(y * dst_stride);
+        let mut x = 0;
+        while x + 4 <= dst_width {
+            let in_x = x * 6;
+            let d = d_row.add(x * 3);
+            let s = s_row.add(in_x);
+
+            *d = *s;
+            *d.add(1) = *s.add(1);
+            *d.add(2) = *s.add(2);
+
+            *d.add(3) = *s.add(6);
+            *d.add(4) = *s.add(7);
+            *d.add(5) = *s.add(8);
+
+            *d.add(6) = *s.add(12);
+            *d.add(7) = *s.add(13);
+            *d.add(8) = *s.add(14);
+
+            *d.add(9) = *s.add(18);
+            *d.add(10) = *s.add(19);
+            *d.add(11) = *s.add(20);
+
+            x += 4;
+        }
+        while x < dst_width {
+            let in_x = x * 6;
+            let d = d_row.add(x * 3);
+            let s = s_row.add(in_x);
+            *d = *s;
+            *d.add(1) = *s.add(1);
+            *d.add(2) = *s.add(2);
+            x += 1;
+        }
     }
 }
 
@@ -87,64 +177,59 @@ unsafe fn resize_nearest_rgb_neon(
     let src_stride = src_width * 3;
     let dst_stride = dst_width * 3;
 
-    // Pre-compute source X coordinates for all destination X positions
-    let mut x_src_coords = vec![0usize; dst_width];
+    let mut x_src_offsets = Vec::<usize>::with_capacity(dst_width);
     let x_scale = (src_width as f32) / (dst_width as f32);
 
     for i in 0..dst_width {
         let x_src = ((i as f32) * x_scale).floor() as usize;
-        x_src_coords[i] = x_src.min(src_width - 1);
+        x_src_offsets.push(x_src.min(src_width - 1) * 3);
     }
 
     let y_scale = (src_height as f32) / (dst_height as f32);
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
 
     for y_new in 0..dst_height {
         let y_src = ((y_new as f32) * y_scale).floor() as usize;
         let y_src = y_src.min(src_height - 1);
 
-        let src_row_base = y_src * src_stride;
-        let dst_row_base = y_new * dst_stride;
+        let src_row = src_ptr.add(y_src * src_stride);
+        let dst_row = dst_ptr.add(y_new * dst_stride);
 
-        let mut x_new = 0;
+        let mut x = 0;
+        while x + 4 <= dst_width {
+            let x0 = *x_src_offsets.get_unchecked(x);
+            let x1 = *x_src_offsets.get_unchecked(x + 1);
+            let x2 = *x_src_offsets.get_unchecked(x + 2);
+            let x3 = *x_src_offsets.get_unchecked(x + 3);
 
-        while x_new + 8 <= dst_width {
-            let src_ptr = src.as_ptr().add(src_row_base);
+            let d = dst_row.add(x * 3);
+            *d = *src_row.add(x0);
+            *d.add(1) = *src_row.add(x0 + 1);
+            *d.add(2) = *src_row.add(x0 + 2);
 
-            let mut r_vals = [0u8; 8];
-            let mut g_vals = [0u8; 8];
-            let mut b_vals = [0u8; 8];
+            *d.add(3) = *src_row.add(x1);
+            *d.add(4) = *src_row.add(x1 + 1);
+            *d.add(5) = *src_row.add(x1 + 2);
 
-            for i in 0..8 {
-                let x_src = x_src_coords[x_new + i];
-                let src_idx = x_src * 3;
-                r_vals[i] = *src_ptr.add(src_idx);
-                g_vals[i] = *src_ptr.add(src_idx + 1);
-                b_vals[i] = *src_ptr.add(src_idx + 2);
-            }
+            *d.add(6) = *src_row.add(x2);
+            *d.add(7) = *src_row.add(x2 + 1);
+            *d.add(8) = *src_row.add(x2 + 2);
 
-            let r = vld1_u8(r_vals.as_ptr());
-            let g = vld1_u8(g_vals.as_ptr());
-            let b = vld1_u8(b_vals.as_ptr());
+            *d.add(9) = *src_row.add(x3);
+            *d.add(10) = *src_row.add(x3 + 1);
+            *d.add(11) = *src_row.add(x3 + 2);
 
-            let dst_ptr = dst.as_mut_ptr().add(dst_row_base + x_new * 3);
-            let out = uint8x8x3_t(r, g, b);
-            vst3_u8(dst_ptr, out);
-
-            x_new += 8;
+            x += 4;
         }
 
-        while x_new < dst_width {
-            let x_src = x_src_coords[x_new];
-            let src_idx = src_row_base + x_src * 3;
-            let dst_idx = dst_row_base + x_new * 3;
-
-            std::ptr::copy_nonoverlapping(
-                src.as_ptr().add(src_idx),
-                dst.as_mut_ptr().add(dst_idx),
-                3,
-            );
-
-            x_new += 1;
+        while x < dst_width {
+            let x0 = *x_src_offsets.get_unchecked(x);
+            let d = dst_row.add(x * 3);
+            *d = *src_row.add(x0);
+            *d.add(1) = *src_row.add(x0 + 1);
+            *d.add(2) = *src_row.add(x0 + 2);
+            x += 1;
         }
     }
 }
@@ -158,46 +243,53 @@ unsafe fn resize_nearest_gray_neon(
     dst_width: usize,
     dst_height: usize,
 ) {
-    // Pre-compute source X coordinates for all destination X positions
-    let mut x_src_coords = vec![0usize; dst_width];
+    let mut x_src_coords = Vec::<usize>::with_capacity(dst_width);
     let x_scale = (src_width as f32) / (dst_width as f32);
 
     for i in 0..dst_width {
         let x_src = ((i as f32) * x_scale).floor() as usize;
-        x_src_coords[i] = x_src.min(src_width - 1);
+        x_src_coords.push(x_src.min(src_width - 1));
     }
 
     let y_scale = (src_height as f32) / (dst_height as f32);
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
 
     for y_new in 0..dst_height {
         let y_src = ((y_new as f32) * y_scale).floor() as usize;
         let y_src = y_src.min(src_height - 1);
 
-        let src_row_base = y_src * src_width;
-        let dst_row_base = y_new * dst_width;
+        let src_row = src_ptr.add(y_src * src_width);
+        let dst_row = dst_ptr.add(y_new * dst_width);
 
-        let mut x_new = 0;
+        let mut x = 0;
+        while x + 8 <= dst_width {
+            let x0 = *x_src_coords.get_unchecked(x);
+            let x1 = *x_src_coords.get_unchecked(x + 1);
+            let x2 = *x_src_coords.get_unchecked(x + 2);
+            let x3 = *x_src_coords.get_unchecked(x + 3);
+            let x4 = *x_src_coords.get_unchecked(x + 4);
+            let x5 = *x_src_coords.get_unchecked(x + 5);
+            let x6 = *x_src_coords.get_unchecked(x + 6);
+            let x7 = *x_src_coords.get_unchecked(x + 7);
 
-        // Process 16 pixels at a time using NEON
-        while x_new + 16 <= dst_width {
-            let mut vals = [0u8; 16];
+            let d = dst_row.add(x);
+            *d = *src_row.add(x0);
+            *d.add(1) = *src_row.add(x1);
+            *d.add(2) = *src_row.add(x2);
+            *d.add(3) = *src_row.add(x3);
+            *d.add(4) = *src_row.add(x4);
+            *d.add(5) = *src_row.add(x5);
+            *d.add(6) = *src_row.add(x6);
+            *d.add(7) = *src_row.add(x7);
 
-            for i in 0..16 {
-                let x_src = x_src_coords[x_new + i];
-                vals[i] = *src.as_ptr().add(src_row_base + x_src);
-            }
-
-            let pixels = vld1q_u8(vals.as_ptr());
-            vst1q_u8(dst.as_mut_ptr().add(dst_row_base + x_new), pixels);
-
-            x_new += 16;
+            x += 8;
         }
 
-        // Process remaining pixels
-        while x_new < dst_width {
-            let x_src = x_src_coords[x_new];
-            dst[dst_row_base + x_new] = src[src_row_base + x_src];
-            x_new += 1;
+        while x < dst_width {
+            let x0 = *x_src_coords.get_unchecked(x);
+            *dst_row.add(x) = *src_row.add(x0);
+            x += 1;
         }
     }
 }

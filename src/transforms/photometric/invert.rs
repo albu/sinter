@@ -81,6 +81,19 @@ impl LutOp for Invert {
         };
         INVERT_LUT
     }
+
+    fn execute_with_lut(&self, image: &mut crate::core::FusableImage) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            neon::apply_invert_neon(image);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for pixel in &mut image.data[..] {
+                *pixel = 255 - *pixel;
+            }
+        }
+    }
 }
 
 impl Executable for Invert {

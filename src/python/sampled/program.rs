@@ -308,15 +308,25 @@ impl PySampledImageProgram {
 
             match result {
                 Some(new_barrier) => {
-                    let (new_h, new_w) = (new_barrier.height, new_barrier.width);
+                    let (new_h, new_w, new_c) = (new_barrier.height, new_barrier.width, new_barrier.channels);
                     let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
-                    let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Failed to reshape array: {}",
-                            e
-                        ))
-                    })?;
-                    Ok(array_2d.as_ref())
+                    if new_c == 1 {
+                        let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Failed to reshape array: {}",
+                                e
+                            ))
+                        })?;
+                        Ok(array_2d.as_ref())
+                    } else {
+                        let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Failed to reshape array: {}",
+                                e
+                            ))
+                        })?;
+                        Ok(array_3d.as_ref())
+                    }
                 }
                 None => Ok(array2.as_ref()),
             }
