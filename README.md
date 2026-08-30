@@ -262,7 +262,14 @@ To build from source or contribute, you'll need:
 pip install maturin
 
 # Build and install development wheel
-maturin develop --release --features "python"
+# NOTE: prefer the script below. `maturin develop`/`uv pip install` can
+# resolve a STALE sinter wheel from the uv cache (this has repeatedly
+# replaced the installed extension with an old build that fails ~64 Python
+# tests). The script builds fresh, force-installs, and verifies behavior.
+./scripts/rebuild_sinter.sh
+
+# Quick check that the installed extension matches the current source
+.venv/bin/python scripts/verify_sinter_install.py
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for architectural details and IR design.
