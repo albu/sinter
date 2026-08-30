@@ -96,11 +96,64 @@ impl LutOp for Posterize {
     fn get_lut(&self) -> [u8; 256] {
         *self.lut.get_or_init(|| self.build_lut())
     }
+
+    fn execute_with_lut(&self, image: &mut FusableImage) {
+        if self.bits >= 8 {
+            return;
+        }
+        let mask = !((1u8 << (8 - self.bits)) - 1);
+        apply_posterize_simd(image, mask);
+    }
+}
+
+fn apply_posterize_simd(image: &mut FusableImage, mask: u8) {
+    let data = &mut image.data;
+    let len = data.len();
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let v_mask = vdupq_n_u8(mask);
+        let chunks = len / 64;
+        let mut ptr = data.as_mut_ptr();
+        for _ in 0..chunks {
+            let v0 = vld1q_u8(ptr);
+            let v1 = vld1q_u8(ptr.add(16));
+            let v2 = vld1q_u8(ptr.add(32));
+            let v3 = vld1q_u8(ptr.add(48));
+
+            vst1q_u8(ptr, vandq_u8(v0, v_mask));
+            vst1q_u8(ptr.add(16), vandq_u8(v1, v_mask));
+            vst1q_u8(ptr.add(32), vandq_u8(v2, v_mask));
+            vst1q_u8(ptr.add(48), vandq_u8(v3, v_mask));
+
+            ptr = ptr.add(64);
+        }
+
+        let rem_chunks = (len % 64) / 16;
+        for _ in 0..rem_chunks {
+            let v = vld1q_u8(ptr);
+            vst1q_u8(ptr, vandq_u8(v, v_mask));
+            ptr = ptr.add(16);
+        }
+
+        let rem_start = chunks * 64 + rem_chunks * 16;
+        for i in rem_start..len {
+            data[i] &= mask;
+        }
+        return;
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for b in data.iter_mut() {
+            *b &= mask;
+        }
+    }
 }
 
 impl Executable for Posterize {
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        // Use LUT for fast execution (3-5x faster than per-pixel)
         self.execute_with_lut(image);
         None
     }

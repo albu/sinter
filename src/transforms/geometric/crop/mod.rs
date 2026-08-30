@@ -138,7 +138,11 @@ impl Executable for Crop {
         let x_offset = self.x as usize * channels;
         let y_start = self.y as usize;
 
-        let mut cropped_data = vec![0u8; cropped_width * cropped_height * channels];
+        let len = cropped_width * cropped_height * channels;
+        let mut cropped_data = Vec::<u8>::with_capacity(len);
+        unsafe {
+            cropped_data.set_len(len);
+        }
 
         // Use NEON SIMD for RGB and grayscale when crop width is sufficient
         if cropped_width >= 16 && (channels == 3 || channels == 1) {
