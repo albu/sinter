@@ -235,6 +235,11 @@ pub unsafe fn convolve_separable_neon_5(image: &mut FusableImage, _kernel: &[i32
     let channels = image.channels;
     let data = &mut image.data;
 
+    if channels == 1 {
+        convolve_separable_gray_neon_5(image);
+        return;
+    }
+
     if channels != 3 {
         // Fallback to scalar for non-RGB
         super::super::super::convolve::convolve_1d_horizontal(image, &[1, 4, 6, 4, 1], 16);
@@ -480,4 +485,125 @@ unsafe fn blur5_scalar_to_u8(a: uint8x8_t, b: uint8x8_t, c: uint8x8_t, d: uint8x
     let sum = vmlal_u8(sum, d, vdup_n_u8(4));
     let sum = vmlal_u8(sum, e, vdup_n_u8(1));
     vshrn_n_u16(sum, 4)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn blur5_gray_u8(p_m2: uint8x16_t, p_m1: uint8x16_t, p_0: uint8x16_t, p_p1: uint8x16_t, p_p2: uint8x16_t) -> uint8x16_t {
+    let outer_lo = vaddl_u8(vget_low_u8(p_m2), vget_low_u8(p_p2));
+    let inner_lo = vaddl_u8(vget_low_u8(p_m1), vget_low_u8(p_p1));
+    let mut sum_lo = vmlal_u8(outer_lo, vget_low_u8(p_0), vdup_n_u8(6));
+    sum_lo = vaddq_u16(sum_lo, vshlq_n_u16(inner_lo, 2));
+    let res_lo = vrshrn_n_u16(sum_lo, 4);
+
+    let outer_hi = vaddl_u8(vget_high_u8(p_m2), vget_high_u8(p_p2));
+    let inner_hi = vaddl_u8(vget_high_u8(p_m1), vget_high_u8(p_p1));
+    let mut sum_hi = vmlal_u8(outer_hi, vget_high_u8(p_0), vdup_n_u8(6));
+    sum_hi = vaddq_u16(sum_hi, vshlq_n_u16(inner_hi, 2));
+    let res_hi = vrshrn_n_u16(sum_hi, 4);
+
+    vcombine_u8(res_lo, res_hi)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
+    let width = image.width;
+    let height = image.height;
+    let data = &mut image.data;
+    let total_bytes = data.len();
+    let mut temp = Vec::<u8>::with_capacity(total_bytes);
+    unsafe { temp.set_len(total_bytes); }
+    let radius = 2;
+    const TILE: usize = 16;
+
+    // HORIZONTAL PASS
+    for y in 0..height {
+        let row_offset = y * width;
+        let in_ptr = data.as_ptr().add(row_offset);
+        let out_ptr = temp.as_mut_ptr().add(row_offset);
+
+        // Left edge (x = 0, 1)
+        for x in 0..width.min(radius) {
+            let mut sum: u32 = 0;
+            for k in 0..5 {
+                let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
+            }
+            *out_ptr.add(x) = ((sum + 8) >> 4) as u8;
+        }
+
+        let simd_start = radius;
+        let simd_end = width.saturating_sub(radius);
+        let simd_chunks = if simd_end > simd_start { (simd_end - simd_start) / TILE } else { 0 };
+
+        let mut x = simd_start;
+        for _ in 0..simd_chunks {
+            let p_2 = vld1q_u8(in_ptr.add(x - 2));
+            let p_1 = vld1q_u8(in_ptr.add(x - 1));
+            let p0  = vld1q_u8(in_ptr.add(x));
+            let p1  = vld1q_u8(in_ptr.add(x + 1));
+            let p2  = vld1q_u8(in_ptr.add(x + 2));
+
+            let combined = blur5_gray_u8(p_2, p_1, p0, p1, p2);
+            vst1q_u8(out_ptr.add(x), combined);
+            x += TILE;
+        }
+
+        // Remainder
+        for rem_x in x..simd_end {
+            let mut sum: u32 = 0;
+            for k in 0..5 {
+                let px = (rem_x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
+            }
+            *out_ptr.add(rem_x) = ((sum + 8) >> 4) as u8;
+        }
+
+        // Right edge
+        for rx in simd_end.max(radius)..width {
+            let mut sum: u32 = 0;
+            for k in 0..5 {
+                let px = (rx as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [1u32, 4, 6, 4, 1][k]);
+            }
+            *out_ptr.add(rx) = ((sum + 8) >> 4) as u8;
+        }
+    }
+
+    // VERTICAL PASS
+    let row_chunks = width / 16;
+    for y in 0..height {
+        let y_m2 = (y as i32 - 2).clamp(0, height as i32 - 1) as usize;
+        let y_m1 = (y as i32 - 1).clamp(0, height as i32 - 1) as usize;
+        let y_p1 = (y as i32 + 1).clamp(0, height as i32 - 1) as usize;
+        let y_p2 = (y as i32 + 2).clamp(0, height as i32 - 1) as usize;
+
+        let ptr_m2 = temp.as_ptr().add(y_m2 * width);
+        let ptr_m1 = temp.as_ptr().add(y_m1 * width);
+        let ptr_0  = temp.as_ptr().add(y * width);
+        let ptr_p1 = temp.as_ptr().add(y_p1 * width);
+        let ptr_p2 = temp.as_ptr().add(y_p2 * width);
+        let out_ptr = data.as_mut_ptr().add(y * width);
+
+        for chunk in 0..row_chunks {
+            let offset = chunk * 16;
+            let r_m2 = vld1q_u8(ptr_m2.add(offset));
+            let r_m1 = vld1q_u8(ptr_m1.add(offset));
+            let r_0  = vld1q_u8(ptr_0.add(offset));
+            let r_p1 = vld1q_u8(ptr_p1.add(offset));
+            let r_p2 = vld1q_u8(ptr_p2.add(offset));
+
+            let combined = blur5_gray_u8(r_m2, r_m1, r_0, r_p1, r_p2);
+            vst1q_u8(out_ptr.add(offset), combined);
+        }
+
+        for x in (row_chunks * 16)..width {
+            let sum = *ptr_m2.add(x) as u32
+                + *ptr_m1.add(x) as u32 * 4
+                + *ptr_0.add(x) as u32 * 6
+                + *ptr_p1.add(x) as u32 * 4
+                + *ptr_p2.add(x) as u32;
+            *out_ptr.add(x) = ((sum + 8) >> 4) as u8;
+        }
+    }
 }

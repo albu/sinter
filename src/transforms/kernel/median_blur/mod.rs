@@ -5,6 +5,7 @@
 
 mod fast;
 mod huang;
+mod histogram;
 #[cfg(target_arch = "aarch64")]
 mod neon;
 pub mod sorting_network;
@@ -104,8 +105,19 @@ impl MedianBlur {
                 }
             }
             MedianKernelSize::Kernel5 => {
-                // Exact 5x5 median via sliding column-histogram.
-                huang::apply_median_blur_5x5_huang(image);
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    neon::apply_median_blur_5x5_neon(
+                        &mut image.data,
+                        image.width,
+                        image.height,
+                        image.channels,
+                    );
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    histogram::apply_median_blur_5x5(image);
+                }
             }
         }
     }

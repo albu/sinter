@@ -238,14 +238,17 @@ impl Executable for SampledImageOp {
             }
 
             // Noise transforms
-            SampledImageOp::GaussNoise { mean, std } => GaussNoise::new(*mean, *std).execute(image),
-            SampledImageOp::MultiplicativeNoise { multiplier } => {
-                MultiplicativeNoise::new(*multiplier, 0.1).execute(image)
+            SampledImageOp::GaussNoise { mean, std, seed } => {
+                GaussNoise::with_seed(*mean, *std, *seed).execute(image)
+            }
+            SampledImageOp::MultiplicativeNoise { multiplier, seed } => {
+                MultiplicativeNoise::with_seed(*multiplier, 0.1, *seed).execute(image)
             }
             SampledImageOp::SaltAndPepper {
                 amount,
                 salt_vs_pepper,
-            } => SaltAndPepper::new(*amount, *salt_vs_pepper).execute(image),
+                seed,
+            } => SaltAndPepper::with_seed(*amount, *salt_vs_pepper, *seed).execute(image),
             SampledImageOp::NoiseGranularity {
                 mean,
                 std,
@@ -261,17 +264,24 @@ impl Executable for SampledImageOp {
             }
 
             // Dropout transforms
-            SampledImageOp::CoarseDropout { holes, hole_size } => CoarseDropout::new(
+            SampledImageOp::CoarseDropout {
+                holes,
+                hole_size,
+                seed,
+            } => CoarseDropout::with_seed(
                 *holes as u32,
                 (hole_size.0 as f32 / 255.0, hole_size.1 as f32 / 255.0),
                 0,
+                *seed,
             )
             .execute(image),
             SampledImageOp::GridDropout {
                 ratio,
                 unit_size,
                 holes: _,
-            } => GridDropout::new((*unit_size, *unit_size), *ratio, 0).execute(image),
+                seed,
+            } => GridDropout::with_seed((*unit_size, *unit_size), *ratio, 0, *seed)
+                .execute(image),
 
             // Geometric transforms
             SampledImageOp::HorizontalFlip => HorizontalFlip.execute(image),
@@ -341,12 +351,15 @@ impl Executable for SampledImageOp {
                 Pad::new(*top, *bottom, *left, *right, pad_mode).execute(image)
             }
             SampledImageOp::Affine {
-                matrix,
+                scale,
+                rotate,
+                translate,
+                shear,
                 interpolation,
                 border_mode,
             } => {
                 use crate::transforms::geometric::affine::{
-                    AffineBorderMode, AffineInterpolation,
+                    AffineBorderMode, AffineInterpolation, AffineParams,
                 };
                 let affine_interp = match interpolation {
                     Interpolation::Nearest => AffineInterpolation::Nearest,
@@ -363,7 +376,12 @@ impl Executable for SampledImageOp {
                     crate::sampled_ir::ops::BorderMode::Replicate => AffineBorderMode::Replicate,
                     crate::sampled_ir::ops::BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
-                let params = crate::sampled_ir::ops::affine_params_from_matrix(*matrix);
+                let params = AffineParams {
+                    scale: *scale,
+                    rotate: *rotate,
+                    translate: *translate,
+                    shear: *shear,
+                };
                 Affine::with_all(
                     params,
                     image.width,
@@ -493,7 +511,10 @@ mod tests {
         let mut img = FusableImage::new(&mut data, w, h, 1);
 
         let op = SampledImageOp::Affine {
-            matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            scale: (1.0, 1.0),
+            rotate: 0.0,
+            translate: (0.0, 0.0),
+            shear: (0.0, 0.0),
             interpolation: Interpolation::Bilinear,
             border_mode: BorderMode::Constant { value: 0 },
         };
@@ -536,8 +557,9 @@ mod tests {
             SampledImageOp::GaussNoise {
                 mean: 0.0,
                 std: 1.0,
+                seed: 0,
             },
-            SampledImageOp::MultiplicativeNoise { multiplier: 1.0 },
+            SampledImageOp::MultiplicativeNoise { multiplier: 1.0, seed: 0 },
         ];
 
         for op in ops {

@@ -29,30 +29,23 @@ impl Equalize {
         Self
     }
 
-    /// Build equalization LUT from image histogram
-    ///
-    /// Uses fixed-point arithmetic to avoid float operations in the hot path.
-    fn build_lut(&self, image: &FusableImage) -> [u8; 256] {
-        let mut histogram = [0u32; 256];
-        let total_pixels = (image.width * image.height * image.channels) as u32;
-
-        // Build histogram - scalar but cache-friendly sequential access
-        for &pixel in image.data.iter() {
-            histogram[pixel as usize] += 1;
+    /// Build equalization LUT for a single channel histogram using OpenCV formula
+    fn compute_lut(hist: &[u32; 256], total_pixels: u32) -> [u8; 256] {
+        let mut i = 0;
+        while i < 256 && hist[i] == 0 {
+            i += 1;
         }
 
-        // Build equalization LUT using CDF with fixed-point arithmetic
-        // Fixed-point: multiply by 255 first, then divide to avoid float
-        let mut cdf = 0u32;
         let mut lut = [0u8; 256];
-
-        for i in 0..256 {
-            cdf += histogram[i];
-            // Fixed-point: (cdf * 255) / total_pixels
-            // This avoids expensive float division
-            lut[i] = ((cdf * 255) / total_pixels) as u8;
+        if i < 256 && hist[i] < total_pixels {
+            let scale = 255.0f32 / ((total_pixels - hist[i]) as f32);
+            let mut sum = 0u32;
+            for j in i..256 {
+                sum += hist[j];
+                let val = ((sum - hist[i]) as f32 * scale).round() as i32;
+                lut[j] = val.clamp(0, 255) as u8;
+            }
         }
-
         lut
     }
 }
@@ -77,10 +70,49 @@ impl Transform for Equalize {
 
 impl Executable for Equalize {
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        let lut = self.build_lut(image);
+        let channels = image.channels;
+        let total_pixels = (image.width * image.height) as u32;
 
-        // Use optimized LUT executor (NEON vqtbl4q_u8 on ARM)
-        LutExecutor::apply(image, &lut);
+        if channels == 1 {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, total_pixels);
+            LutExecutor::apply(image, &lut);
+        } else if channels == 3 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let chunks = image.data.chunks_exact(3);
+            for chunk in chunks {
+                hist_r[chunk[0] as usize] += 1;
+                hist_g[chunk[1] as usize] += 1;
+                hist_b[chunk[2] as usize] += 1;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+
+            let data = &mut image.data;
+            let len = data.len();
+            let mut i = 0;
+            while i + 3 <= len {
+                data[i] = lut_r[data[i] as usize];
+                data[i + 1] = lut_g[data[i + 1] as usize];
+                data[i + 2] = lut_b[data[i + 2] as usize];
+                i += 3;
+            }
+        } else {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, (image.width * image.height * channels) as u32);
+            LutExecutor::apply(image, &lut);
+        }
 
         None
     }
@@ -208,6 +240,20 @@ mod tests {
         for &px in img.data.iter() {
             assert!((0..=255).contains(&px));
         }
+    }
+
+    #[test]
+    fn test_equalize_lut_values() {
+        let mut data = Vec::with_capacity(4096);
+        for y in 0..64 {
+            for x in 0..64 {
+                data.push((x as f32 / 64.0 * 255.0) as u8);
+            }
+        }
+        let mut img = FusableImage::new(&mut data, 64, 64, 1);
+        let eq = Equalize::new();
+        eq.execute(&mut img);
+        println!("Rust Equalize img.data[..5]: {:?}", &img.data[..5]);
     }
 
     #[test]

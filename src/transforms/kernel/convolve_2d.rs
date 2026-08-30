@@ -427,7 +427,8 @@ unsafe fn apply_emboss_neon(
     channels: usize,
     kernel: &[i32; 9],
 ) {
-    let mut output = vec![0u8; data.len()];
+    let mut output = Vec::with_capacity(data.len());
+    unsafe { output.set_len(data.len()); }
     let stride = width * channels;
 
     // Top and bottom border rows (scalar)

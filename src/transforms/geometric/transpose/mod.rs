@@ -88,8 +88,9 @@ impl Executable for Transpose {
         let channels = image.channels;
         let src_stride = image.width * channels;
         let dst_stride = new_width * channels;
-
-        let mut transposed_data = vec![0u8; new_width * new_height * channels];
+        let total_bytes = new_width * new_height * channels;
+        let mut transposed_data = Vec::<u8>::with_capacity(total_bytes);
+        unsafe { transposed_data.set_len(total_bytes); }
 
         // Use optimized SIMD path for RGB and grayscale
         if channels == 3 {

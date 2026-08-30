@@ -66,7 +66,7 @@ impl PyCompose {
     #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", seed=None))]
     fn __call__<'py>(
         &self,
-        image: &'py PyArray3<u8>,
+        image: &'py PyAny,
         bboxes: Option<&PyArray2<f32>>,
         keypoints: Option<&PyArray2<f32>>,
         masks: Option<&PyAny>,
@@ -75,7 +75,7 @@ impl PyCompose {
         seed: Option<u64>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
-        use numpy::PyArray2;
+        use numpy::{PyArray2, PyArray3};
         use pyo3::types::{PyDict, PyList};
 
         // 1. Sample the pipeline (randomness resolution)
@@ -92,10 +92,24 @@ impl PyCompose {
         let result_dict = PyDict::new(py);
         result_dict.set_item("image", transformed_image_array)?;
 
+        // Helper to get (width, height)
+        let get_image_size = || -> PyResult<(u32, u32)> {
+            if let Ok(arr3) = image.downcast::<PyArray3<u8>>() {
+                let s = arr3.shape();
+                Ok((s[1] as u32, s[0] as u32))
+            } else if let Ok(arr2) = image.downcast::<PyArray2<u8>>() {
+                let s = arr2.shape();
+                Ok((s[1] as u32, s[0] as u32))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Expected 2D or 3D uint8 numpy array",
+                ))
+            }
+        };
+
         // 4. Transform and add bboxes if present
         if let Some(bbox_array) = bboxes {
-            let image_shape = image.shape();
-            let image_size = (image_shape[1] as u32, image_shape[0] as u32);
+            let image_size = get_image_size()?;
             let transformed_bboxes =
                 sampled.apply_to_bboxes(bbox_array, image_size, bbox_format, None, py)?;
             result_dict.set_item("bboxes", transformed_bboxes)?;
@@ -103,8 +117,7 @@ impl PyCompose {
 
         // 5. Transform and add keypoints if present
         if let Some(kpt_array) = keypoints {
-            let image_shape = image.shape();
-            let image_size = (image_shape[1] as u32, image_shape[0] as u32);
+            let image_size = get_image_size()?;
             let transformed_keypoints =
                 sampled.apply_to_keypoints(kpt_array, image_size, keypoint_format, None, py)?;
             result_dict.set_item("keypoints", transformed_keypoints)?;
@@ -112,8 +125,7 @@ impl PyCompose {
 
         // 6. Transform and add masks if present
         if let Some(mask_array) = masks {
-            let image_shape = image.shape();
-            let image_size = (image_shape[1] as u32, image_shape[0] as u32);
+            let image_size = get_image_size()?;
             let transformed_masks = sampled.apply_to_masks(mask_array, image_size, py)?;
             result_dict.set_item("masks", transformed_masks)?;
         }
@@ -125,7 +137,7 @@ impl PyCompose {
     ///
     /// This is a convenience method that returns only the transformed image.
     /// For batch processing with bboxes/keypoints/masks, use `__call__` instead.
-    fn apply<'py>(&self, array: &'py PyArray3<u8>, py: Python<'py>) -> PyResult<&'py PyArray3<u8>> {
+    fn apply<'py>(&self, array: &'py PyAny, py: Python<'py>) -> PyResult<&'py PyAny> {
         // Use random seed
         let seed = rand::random();
         let sampled_inner = self.inner.sample_with_seed(seed);

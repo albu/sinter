@@ -147,10 +147,15 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
     let channels = image.channels;
     let data = &mut image.data;
 
+    if channels == 1 {
+        convolve_separable_gray_neon_7(image);
+        return;
+    }
+
     if channels != 3 {
         // Fallback to scalar for non-RGB
-        super::super::super::convolve::convolve_1d_horizontal(image, &[1, 6, 15, 20, 15, 6, 1], 64);
-        super::super::super::convolve::convolve_1d_vertical(image, &[1, 6, 15, 20, 15, 6, 1], 64);
+        super::super::super::convolve::convolve_1d_horizontal(image, &[2, 7, 14, 18, 14, 7, 2], 64);
+        super::super::super::convolve::convolve_1d_vertical(image, &[2, 7, 14, 18, 14, 7, 2], 64);
         return;
     }
 
@@ -160,14 +165,14 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
     // Allocate u16 intermediate buffer
     let mut temp_u16 = vec![0u16; data.len()];
 
-    // Kernel weights for 7x7 Pascal's triangle: [1, 6, 15, 20, 15, 6, 1]
-    let k0 = vdup_n_u8(1);
-    let k1 = vdup_n_u8(6);
-    let k2 = vdup_n_u8(15);
-    let k3 = vdup_n_u8(20);
-    let k4 = vdup_n_u8(15);
-    let k5 = vdup_n_u8(6);
-    let k6 = vdup_n_u8(1);
+    // Kernel weights for 7x7 Gaussian blur matching OpenCV (sigma=1.4): [2, 7, 14, 18, 14, 7, 2]
+    let k0 = vdup_n_u8(2);
+    let k1 = vdup_n_u8(7);
+    let k2 = vdup_n_u8(14);
+    let k3 = vdup_n_u8(18);
+    let k4 = vdup_n_u8(14);
+    let k5 = vdup_n_u8(7);
+    let k6 = vdup_n_u8(2);
 
     let radius = 3;
     let row_bytes = width * 3; // Total bytes per row
@@ -181,7 +186,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
                 let mut sum: u32 = 0;
                 for k in 0..7 {
                     let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                    sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                    sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
                 }
                 temp_u16[row_offset + x * 3 + c] = (sum >> 6) as u16;
             }
@@ -255,7 +260,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
                     let mut sum: u32 = 0;
                     for k in 0..7 {
                         let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                        sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                        sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
                     }
                     temp_u16[row_offset + x * 3 + c] = (sum >> 6) as u16;
                 }
@@ -267,7 +272,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
                     let mut sum: u32 = 0;
                     for k in 0..7 {
                         let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                        sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                        sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
                     }
                     temp_u16[row_offset + x * 3 + c] = (sum >> 6) as u16;
                 }
@@ -285,10 +290,10 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
     let output_stride = row_bytes;
 
     // Symmetric weights (pre-loaded for SIMD)
-    let k0 = vdup_n_u16(1);
-    let k1 = vdup_n_u16(6);
-    let k2 = vdup_n_u16(15);
-    let k3 = vdup_n_u16(20);
+    let k0 = vdup_n_u16(2);
+    let k1 = vdup_n_u16(7);
+    let k2 = vdup_n_u16(14);
+    let k3 = vdup_n_u16(18);
 
     // Process 8 u16 values at a time for full row processing
     const VALS_PER_ITER: usize = 8;
@@ -299,7 +304,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
             let mut sum: u32 = 0;
             for k in 0..7 {
                 let py = (y as i32 + k as i32 - radius as i32).clamp(0, height as i32 - 1) as usize;
-                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
             output[y * output_stride + i] = (sum >> 6) as u8;
         }
@@ -369,7 +374,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
             let mut sum: u32 = 0;
             for k in 0..7 {
                 let py = (y as i32 + k as i32 - radius as i32).clamp(0, height as i32 - 1) as usize;
-                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
             output[y * output_stride + i] = (sum >> 6) as u8;
         }
@@ -381,7 +386,7 @@ pub(crate) unsafe fn convolve_separable_neon_7(image: &mut FusableImage, _kernel
             let mut sum: u32 = 0;
             for k in 0..7 {
                 let py = (y as i32 + k as i32 - radius as i32).clamp(0, height as i32 - 1) as usize;
-                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [1u32, 6, 15, 20, 15, 6, 1][k]);
+                sum = sum.wrapping_add(temp_u16[py * temp_stride + i] as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
             }
             output[y * output_stride + i] = (sum >> 6) as u8;
         }
@@ -472,4 +477,161 @@ unsafe fn vertical_pass_scalar_optimized(
 ) {
     // Fallback for non-ARM architectures
     unreachable!("NEON helper functions should not be called on non-ARM platforms");
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn convolve_separable_gray_neon_7(image: &mut FusableImage) {
+    let width = image.width;
+    let height = image.height;
+    let data = &mut image.data;
+    let mut temp = vec![0u8; data.len()];
+    let radius = 3;
+    const TILE: usize = 16;
+
+    let k0 = vdup_n_u8(2);
+    let k1 = vdup_n_u8(7);
+    let k2 = vdup_n_u8(14);
+    let k3 = vdup_n_u8(18);
+    let k4 = vdup_n_u8(14);
+    let k5 = vdup_n_u8(7);
+    let k6 = vdup_n_u8(2);
+
+    // HORIZONTAL PASS
+    for y in 0..height {
+        let row_offset = y * width;
+        let in_ptr = data.as_ptr().add(row_offset);
+        let out_ptr = temp.as_mut_ptr().add(row_offset);
+
+        // Left edge (x = 0, 1, 2)
+        for x in 0..width.min(radius) {
+            let mut sum: u32 = 0;
+            for k in 0..7 {
+                let px = (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
+            }
+            *out_ptr.add(x) = ((sum + 32) >> 6) as u8;
+        }
+
+        let simd_start = radius;
+        let simd_end = width.saturating_sub(radius);
+        let simd_chunks = if simd_end > simd_start { (simd_end - simd_start) / TILE } else { 0 };
+
+        let mut x = simd_start;
+        for _ in 0..simd_chunks {
+            let p_3 = vld1q_u8(in_ptr.add(x - 3));
+            let p_2 = vld1q_u8(in_ptr.add(x - 2));
+            let p_1 = vld1q_u8(in_ptr.add(x - 1));
+            let p0  = vld1q_u8(in_ptr.add(x));
+            let p1  = vld1q_u8(in_ptr.add(x + 1));
+            let p2  = vld1q_u8(in_ptr.add(x + 2));
+            let p3  = vld1q_u8(in_ptr.add(x + 3));
+
+            // Low 8
+            let mut sum_lo = vmull_u8(vget_low_u8(p_3), k0);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p_2), k1);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p_1), k2);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p0), k3);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p1), k4);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p2), k5);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(p3), k6);
+            let lo = vrshrn_n_u16(sum_lo, 6);
+
+            // High 8
+            let mut sum_hi = vmull_u8(vget_high_u8(p_3), k0);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p_2), k1);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p_1), k2);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p0), k3);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p1), k4);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p2), k5);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(p3), k6);
+            let hi = vrshrn_n_u16(sum_hi, 6);
+
+            vst1q_u8(out_ptr.add(x), vcombine_u8(lo, hi));
+            x += TILE;
+        }
+
+        // Remainder
+        for rem_x in x..simd_end {
+            let mut sum: u32 = 0;
+            for k in 0..7 {
+                let px = (rem_x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
+            }
+            *out_ptr.add(rem_x) = ((sum + 32) >> 6) as u8;
+        }
+
+        // Right edge
+        for rx in simd_end.max(radius)..width {
+            let mut sum: u32 = 0;
+            for k in 0..7 {
+                let px = (rx as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
+                sum = sum.wrapping_add(*in_ptr.add(px) as u32 * [2u32, 7, 14, 18, 14, 7, 2][k]);
+            }
+            *out_ptr.add(rx) = ((sum + 32) >> 6) as u8;
+        }
+    }
+
+    // VERTICAL PASS
+    let row_chunks = width / 16;
+    for y in 0..height {
+        let y_m3 = (y as i32 - 3).clamp(0, height as i32 - 1) as usize;
+        let y_m2 = (y as i32 - 2).clamp(0, height as i32 - 1) as usize;
+        let y_m1 = (y as i32 - 1).clamp(0, height as i32 - 1) as usize;
+        let y_p1 = (y as i32 + 1).clamp(0, height as i32 - 1) as usize;
+        let y_p2 = (y as i32 + 2).clamp(0, height as i32 - 1) as usize;
+        let y_p3 = (y as i32 + 3).clamp(0, height as i32 - 1) as usize;
+
+        let ptr_m3 = temp.as_ptr().add(y_m3 * width);
+        let ptr_m2 = temp.as_ptr().add(y_m2 * width);
+        let ptr_m1 = temp.as_ptr().add(y_m1 * width);
+        let ptr_0  = temp.as_ptr().add(y * width);
+        let ptr_p1 = temp.as_ptr().add(y_p1 * width);
+        let ptr_p2 = temp.as_ptr().add(y_p2 * width);
+        let ptr_p3 = temp.as_ptr().add(y_p3 * width);
+        let out_ptr = data.as_mut_ptr().add(y * width);
+
+        for chunk in 0..row_chunks {
+            let offset = chunk * 16;
+            let r_m3 = vld1q_u8(ptr_m3.add(offset));
+            let r_m2 = vld1q_u8(ptr_m2.add(offset));
+            let r_m1 = vld1q_u8(ptr_m1.add(offset));
+            let r_0  = vld1q_u8(ptr_0.add(offset));
+            let r_p1 = vld1q_u8(ptr_p1.add(offset));
+            let r_p2 = vld1q_u8(ptr_p2.add(offset));
+            let r_p3 = vld1q_u8(ptr_p3.add(offset));
+
+            // Low 8
+            let mut sum_lo = vmull_u8(vget_low_u8(r_m3), k0);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_m2), k1);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_m1), k2);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_0), k3);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p1), k4);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p2), k5);
+            sum_lo = vmlal_u8(sum_lo, vget_low_u8(r_p3), k6);
+            let lo = vrshrn_n_u16(sum_lo, 6);
+
+            // High 8
+            let mut sum_hi = vmull_u8(vget_high_u8(r_m3), k0);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_m2), k1);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_m1), k2);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_0), k3);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p1), k4);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p2), k5);
+            sum_hi = vmlal_u8(sum_hi, vget_high_u8(r_p3), k6);
+            let hi = vrshrn_n_u16(sum_hi, 6);
+
+            vst1q_u8(out_ptr.add(offset), vcombine_u8(lo, hi));
+        }
+
+        for x in (row_chunks * 16)..width {
+            let sum = *ptr_m3.add(x) as u32 * 2
+                + *ptr_m2.add(x) as u32 * 7
+                + *ptr_m1.add(x) as u32 * 14
+                + *ptr_0.add(x) as u32 * 18
+                + *ptr_p1.add(x) as u32 * 14
+                + *ptr_p2.add(x) as u32 * 7
+                + *ptr_p3.add(x) as u32 * 2;
+            *out_ptr.add(x) = ((sum + 32) >> 6) as u8;
+        }
+    }
 }

@@ -67,7 +67,10 @@ impl Executable for ToRGB {
         }
 
         let pixel_count = image.width * image.height;
-        let mut rgb_data = vec![0u8; pixel_count * 3];
+        let mut rgb_data = Vec::with_capacity(pixel_count * 3);
+        unsafe {
+            rgb_data.set_len(pixel_count * 3);
+        }
 
         // Use platform-specific SIMD for 3-5x speedup
         #[cfg(target_arch = "aarch64")]

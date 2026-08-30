@@ -39,6 +39,8 @@ pub struct GaussNoise {
     pub mean: f32,
     /// Original std_dev parameter (for repr/debugging)
     pub std_dev: f32,
+    /// Per-pipeline seed so different images get different noise.
+    pub seed: u64,
     lut: Box<[i16; LUT_SIZE]>,
     strength: i16,
     mean_offset: i16,
@@ -50,6 +52,17 @@ impl GaussNoise {
     /// # Panics
     /// Panics if std_dev is negative
     pub fn new(mean: f32, std_dev: f32) -> Self {
+        Self::with_seed(mean, std_dev, 0)
+    }
+
+    /// Create a new GaussNoise transform with an explicit per-pipeline seed.
+    ///
+    /// The seed drives both the LUT generation and the per-pixel offset RNG,
+    /// so different seeds produce different noise patterns.
+    ///
+    /// # Panics
+    /// Panics if std_dev is negative
+    pub fn with_seed(mean: f32, std_dev: f32, seed: u64) -> Self {
         assert!(
             std_dev >= 0.0,
             "std_dev must be non-negative, got {}",
@@ -66,8 +79,8 @@ impl GaussNoise {
         // We'll scale by strength during application
         let mut lut = Box::new([0i16; LUT_SIZE]);
 
-        // Use a simple seed for LUT generation
-        let mut seed = 0u32;
+        // Seed the LUT generation (LCG state initialized from the pipeline seed).
+        let mut lcg: u32 = (seed as u32) | 1;
 
         for entry in lut.iter_mut() {
             let mut sum = 0.0f32;
@@ -75,8 +88,8 @@ impl GaussNoise {
             // Sum 12 uniform random numbers (CLT approximation)
             // Result has mean=6, std=1, so we subtract 6 to get mean=0
             for _ in 0..12 {
-                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                sum += (seed & 0xFFFF) as f32 / 65535.0;
+                lcg = lcg.wrapping_mul(1664525).wrapping_add(1013904223);
+                sum += (lcg & 0xFFFF) as f32 / 65535.0;
             }
 
             // (sum - 6) has mean=0, std=1
@@ -86,6 +99,7 @@ impl GaussNoise {
         Self {
             mean,
             std_dev,
+            seed,
             lut,
             strength,
             mean_offset,
@@ -113,7 +127,13 @@ impl Transform for GaussNoise {
 
 impl Executable for GaussNoise {
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        neon::apply_gauss_noise_neon(&mut image.data, &self.lut, self.strength, self.mean_offset);
+        neon::apply_gauss_noise_neon(
+            &mut image.data,
+            &self.lut,
+            self.strength,
+            self.mean_offset,
+            self.seed,
+        );
         None
     }
 }

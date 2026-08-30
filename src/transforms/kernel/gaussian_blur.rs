@@ -114,13 +114,21 @@ impl GaussianBlur {
             KernelSize::Size5 => {
                 // 5x5 Gaussian - use separable convolution [1 4 6 4 1] for SIMD
                 let kernel = [1, 4, 6, 4, 1];
-                convolve_separable(image, &kernel[..], 16);
+                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                {
+                    use super::convolve_simd;
+                    convolve_simd::convolve_separable_detect(image, &kernel[..], 16);
+                }
+                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                {
+                    convolve_separable(image, &kernel[..], 16);
+                }
             }
             KernelSize::Size7 => {
-                // 7x7 discrete convolution - faster than box blur for small kernels
-                // Pascal's triangle row 6: [1, 6, 15, 20, 15, 6, 1]
+                // 7x7 discrete convolution matching OpenCV's Gaussian kernel (sigma=1.4)
+                // [2, 7, 14, 18, 14, 7, 2] / 64
                 // Sum = 64
-                let kernel = [1i32, 6, 15, 20, 15, 6, 1];
+                let kernel = [2i32, 7, 14, 18, 14, 7, 2];
                 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
                 {
                     use super::convolve_simd;

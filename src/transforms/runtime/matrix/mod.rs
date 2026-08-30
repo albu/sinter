@@ -56,6 +56,19 @@ pub trait MatrixOp: fmt::Debug {
 /// For operations: op1 → op2 → op3
 /// Combined matrix = M3 * M2 * M1
 ///
+/// # Fusion semantics
+///
+/// Fused execution applies the composed linear map and clamps to [0,255] once
+/// at the end ("compose-then-clamp"). This is the mathematically exact
+/// composition of the individual linear maps, and is deterministic for a given
+/// pipeline. It differs from running the ops sequentially only when an
+/// intermediate result would overshoot [0,255]: the sequential path clamps
+/// after every op (losing highlight detail), while the fused path keeps the
+/// higher-precision value. Chains whose composed matrices cannot overshoot
+/// (all coefficients >= 0 and every row sums <= 1) never clamp in the
+/// sequential path either, so fused and sequential differ only by fixed-point
+/// rounding (typically ±1-2 grey levels).
+///
 /// # Arguments
 /// * `ops` - Slice of matrix operations to compose (applied in order)
 ///

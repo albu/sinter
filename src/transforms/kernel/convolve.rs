@@ -231,8 +231,7 @@ pub fn convolve_separable(image: &mut FusableImage, kernel: &[i32], scale: i32) 
     {
         // Use SIMD-optimized version when available
         use super::convolve_simd;
-        convolve_simd::convolve_1d_horizontal_detect(image, kernel, scale);
-        convolve_simd::convolve_1d_vertical_detect(image, kernel, scale);
+        convolve_simd::convolve_separable_detect(image, kernel, scale);
     }
 
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]

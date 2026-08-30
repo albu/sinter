@@ -6,7 +6,7 @@ use super::ops::SampledImageOp;
 use serde::{Deserialize, Serialize};
 
 /// Current IR version (for forward compatibility)
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 /// Serialization error type
 #[derive(Debug, Clone)]

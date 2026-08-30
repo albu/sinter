@@ -242,6 +242,11 @@ pub(crate) unsafe fn convolve_separable_neon_3(
     let channels = image.channels;
     let data = &mut image.data;
 
+    if channels == 1 {
+        convolve_separable_gray_neon_3(image);
+        return;
+    }
+
     if channels != 3 {
         // Fallback to scalar for non-RGB
         super::super::convolve::convolve_1d_horizontal(image, &[1, 2, 1][..], 4);
@@ -471,4 +476,105 @@ unsafe fn blur3_scalar_to_u8(a: uint8x8_t, b: uint8x8_t, c: uint8x8_t) -> uint8x
     let sum = vmlal_u8(sum, b, vdup_n_u8(2));
     let sum = vmlal_u8(sum, c, vdup_n_u8(1));
     vshrn_n_u16(sum, 2)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn blur3_gray_u8(p0: uint8x16_t, p1: uint8x16_t, p2: uint8x16_t) -> uint8x16_t {
+    let ends_lo = vaddl_u8(vget_low_u8(p0), vget_low_u8(p2));
+    let tot_lo = vmlal_u8(ends_lo, vget_low_u8(p1), vdup_n_u8(2));
+    let res_lo = vrshrn_n_u16(tot_lo, 2);
+
+    let ends_hi = vaddl_u8(vget_high_u8(p0), vget_high_u8(p2));
+    let tot_hi = vmlal_u8(ends_hi, vget_high_u8(p1), vdup_n_u8(2));
+    let res_hi = vrshrn_n_u16(tot_hi, 2);
+
+    vcombine_u8(res_lo, res_hi)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn convolve_separable_gray_neon_3(image: &mut FusableImage) {
+    let width = image.width;
+    let height = image.height;
+    let data = &mut image.data;
+    let total_bytes = data.len();
+    let mut temp = Vec::<u8>::with_capacity(total_bytes);
+    unsafe { temp.set_len(total_bytes); }
+    let radius = 1;
+    const TILE: usize = 16;
+
+    // HORIZONTAL PASS
+    for y in 0..height {
+        let row_offset = y * width;
+        let in_ptr = data.as_ptr().add(row_offset);
+        let out_ptr = temp.as_mut_ptr().add(row_offset);
+
+        // Left edge (x = 0)
+        let left_val = *in_ptr as u32;
+        let mid_val = *in_ptr as u32;
+        let right_val = if width > 1 { *in_ptr.add(1) as u32 } else { left_val };
+        *out_ptr = ((left_val + mid_val * 2 + right_val + 2) >> 2) as u8;
+
+        let simd_start = radius;
+        let simd_end = width.saturating_sub(radius);
+        let simd_chunks = if simd_end > simd_start { (simd_end - simd_start) / TILE } else { 0 };
+
+        let mut x = simd_start;
+        for _ in 0..simd_chunks {
+            let p0 = vld1q_u8(in_ptr.add(x - 1));
+            let p1 = vld1q_u8(in_ptr.add(x));
+            let p2 = vld1q_u8(in_ptr.add(x + 1));
+
+            let combined = blur3_gray_u8(p0, p1, p2);
+            vst1q_u8(out_ptr.add(x), combined);
+            x += TILE;
+        }
+
+        // Middle remainder
+        for rem_x in x..simd_end {
+            let p0 = *in_ptr.add(rem_x - 1) as u32;
+            let p1 = *in_ptr.add(rem_x) as u32;
+            let p2 = *in_ptr.add(rem_x + 1) as u32;
+            *out_ptr.add(rem_x) = ((p0 + p1 * 2 + p2 + 2) >> 2) as u8;
+        }
+
+        // Right edge
+        if width > 1 {
+            let rx = width - 1;
+            let p0 = *in_ptr.add(rx - 1) as u32;
+            let p1 = *in_ptr.add(rx) as u32;
+            let p2 = *in_ptr.add(rx) as u32;
+            *out_ptr.add(rx) = ((p0 + p1 * 2 + p2 + 2) >> 2) as u8;
+        }
+    }
+
+    // VERTICAL PASS
+    let row_chunks = width / 16;
+    for y in 0..height {
+        let prev_y = y.saturating_sub(1);
+        let next_y = (y + 1).min(height - 1);
+
+        let prev_ptr = temp.as_ptr().add(prev_y * width);
+        let curr_ptr = temp.as_ptr().add(y * width);
+        let next_ptr = temp.as_ptr().add(next_y * width);
+        let out_ptr = data.as_mut_ptr().add(y * width);
+
+        for chunk in 0..row_chunks {
+            let offset = chunk * 16;
+            let r_prev = vld1q_u8(prev_ptr.add(offset));
+            let r_curr = vld1q_u8(curr_ptr.add(offset));
+            let r_next = vld1q_u8(next_ptr.add(offset));
+
+            let res = blur3_gray_u8(r_prev, r_curr, r_next);
+            vst1q_u8(out_ptr.add(offset), res);
+        }
+
+        for x in (row_chunks * 16)..width {
+            let p0 = *prev_ptr.add(x) as u32;
+            let p1 = *curr_ptr.add(x) as u32;
+            let p2 = *next_ptr.add(x) as u32;
+            *out_ptr.add(x) = ((p0 + p1 * 2 + p2 + 2) >> 2) as u8;
+        }
+    }
 }

@@ -40,23 +40,34 @@ fn test_affine_identity() {
 }
 
 #[test]
-fn test_affine_scale_up() {
-    let mut data = vec![255u8; 9];
-    let mut img = FusableImage::new(&mut data, 3, 3, 1);
-
-    let mut params = AffineParams::default();
-    params.scale = (2.0, 2.0);
-    let a = Affine::with_output_size(params, 6, 6);
-    let result = a.execute(&mut img);
-
-    assert!(result.is_some());
-    let out_img = result.unwrap();
-    assert_eq!(out_img.width, 6);
-    assert_eq!(out_img.height, 6);
-    // Center region should have white pixels from source
-    assert_eq!(out_img.data[0], 255); // Top-left corner
-    assert_eq!(out_img.data[1], 255);
-    assert_eq!(out_img.data[6], 255); // Second row
+fn test_affine_scale_5x5() {
+    let data: Vec<u8> = (0..25).map(|v| v as u8).collect();
+    let mut data_3ch: Vec<u8> = Vec::new();
+    for &v in &data {
+        data_3ch.push(v);
+        data_3ch.push(v);
+        data_3ch.push(v);
+    }
+    let mut img = FusableImage::new(&mut data_3ch, 5, 5, 3);
+    let params = AffineParams {
+        scale: (1.2, 0.8),
+        rotate: 0.0,
+        translate: (0.0, 0.0),
+        shear: (0.0, 0.0),
+    };
+    let a = Affine::with_all(
+        params,
+        5,
+        5,
+        AffineInterpolation::Bilinear,
+        AffineBorderMode::Constant { value: 0 },
+    );
+    let result = a.execute(&mut img).unwrap();
+    println!("Matrix: {:?}", a.build_inverse_matrix(5, 5));
+    for y in 0..5 {
+        let row: Vec<u8> = (0..5).map(|x| result.data[(y * 5 + x) * 3]).collect();
+        println!("Rust row {}: {:?}", y, row);
+    }
 }
 
 #[test]

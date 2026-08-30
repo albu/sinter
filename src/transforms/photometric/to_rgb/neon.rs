@@ -12,13 +12,18 @@ pub unsafe fn to_rgb_neon(src: &[u8], dst: &mut [u8], pixel_count: usize) {
 
     let mut i = 0;
 
-    // Process 8 pixels at a time
+    // Process 16 pixels at a time (48 bytes)
+    while i + 16 <= pixel_count {
+        let gray = vld1q_u8(src.as_ptr().add(i));
+        let rgb = uint8x16x3_t(gray, gray, gray);
+        vst3q_u8(dst.as_mut_ptr().add(i * 3), rgb);
+        i += 16;
+    }
+
+    // Process 8 pixels if available
     while i + 8 <= pixel_count {
-        // Load 8 grayscale pixels
         let gray = vld1_u8(src.as_ptr().add(i));
-        // Create RGB structure by replicating grayscale values
         let rgb = uint8x8x3_t(gray, gray, gray);
-        // Store interleaved RGB: [g0,g0,g0, g1,g1,g1, ...]
         vst3_u8(dst.as_mut_ptr().add(i * 3), rgb);
         i += 8;
     }

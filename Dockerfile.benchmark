@@ -21,4 +21,4 @@ RUN maturin develop --release --features "python"
 
 # Entrypoint script to run benchmarks
 ENTRYPOINT ["python3"]
-CMD ["python/benchmarks/benchmark_unfair_individual.py"]
+CMD ["python/benchmarks/benchmark_individual.py"]

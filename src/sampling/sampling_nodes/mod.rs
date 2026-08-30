@@ -13,6 +13,15 @@ use crate::sampled_ir::SampledImageOp;
 // Re-export distributions for use in sampling
 pub use super::distributions::{Bernoulli, Dist, Uniform, UniformInt};
 
+/// Draw a per-op 64-bit seed from the pipeline RNG. Keeps noise/dropout
+/// transforms stochastic per pipeline execution (same pipeline seed ->
+/// reproducible, different seeds -> different noise).
+fn draw_seed(rng: &mut dyn Rng) -> u64 {
+    let hi = rng.random_i32(i32::MAX) as u64;
+    let lo = rng.random_i32(i32::MAX) as u64;
+    (hi << 32) | lo
+}
+
 // Re-export the Rng trait
 pub use super::traits::Rng;
 
@@ -339,37 +348,13 @@ impl RandomImageNode {
                 let sampled_shear_x = shear.0.sample_f32(ctx.rng);
                 let sampled_shear_y = shear.1.sample_f32(ctx.rng);
 
-                // Build 2x3 affine matrix [a, b, c, d, e, f] for inverse mapping
-                // This matches OpenCV's format for warp_affine
-                let angle_rad = sampled_rotate.to_radians();
-                let cos_a = angle_rad.cos();
-                let sin_a = angle_rad.sin();
-
-                // Forward transform components
-                let sx = sampled_scale_x;
-                let sy = sampled_scale_y;
-                let tx = sampled_translate_x;
-                let ty = sampled_translate_y;
-                let _shx = sampled_shear_x.tan();
-                let _shy = sampled_shear_y.tan();
-
-                // Build inverse matrix for backward mapping
-                // Simplified: scale + rotate + translate (no shear for now)
-                let inv_scale_x = if sx.abs() > 1e-6 { 1.0 / sx } else { 1.0 };
-                let inv_scale_y = if sy.abs() > 1e-6 { 1.0 / sy } else { 1.0 };
-
-                let a = cos_a * inv_scale_x;
-                let b = sin_a * inv_scale_x;
-                let d = -sin_a * inv_scale_y;
-                let e = cos_a * inv_scale_y;
-                let c = -tx * a - ty * d;
-                let f = -tx * b - ty * e;
-
-                let matrix = [a, b, c, d, e, f];
                 let border_mode = crate::sampled_ir::ops::BorderMode::Constant { value: 0 };
 
                 out.push(SampledImageOp::Affine {
-                    matrix,
+                    scale: (sampled_scale_x, sampled_scale_y),
+                    rotate: sampled_rotate,
+                    translate: (sampled_translate_x, sampled_translate_y),
+                    shear: (sampled_shear_x, sampled_shear_y),
                     interpolation: *interpolation,
                     border_mode,
                 });
@@ -439,12 +424,14 @@ impl RandomImageNode {
                 out.push(SampledImageOp::GaussNoise {
                     mean: sampled_mean,
                     std: sampled_std,
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::MultiplicativeNoise { multiplier } => {
                 let sampled_multiplier = multiplier.sample_f32(ctx.rng);
                 out.push(SampledImageOp::MultiplicativeNoise {
                     multiplier: sampled_multiplier,
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::SaltAndPepper {
@@ -456,6 +443,7 @@ impl RandomImageNode {
                 out.push(SampledImageOp::SaltAndPepper {
                     amount: sampled_amount,
                     salt_vs_pepper: sampled_salt_vs_pepper,
+                    seed: draw_seed(ctx.rng),
                 });
             }
 
@@ -527,6 +515,7 @@ impl RandomImageNode {
                 out.push(SampledImageOp::CoarseDropout {
                     holes: sampled_holes.max(1) as usize,
                     hole_size: (sampled_h, sampled_w),
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::GridDropout {
@@ -541,6 +530,7 @@ impl RandomImageNode {
                     ratio: sampled_ratio,
                     unit_size: sampled_unit,
                     holes: sampled_holes,
+                    seed: draw_seed(ctx.rng),
                 });
             }
 

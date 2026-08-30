@@ -175,15 +175,16 @@ pub enum SampledImageOp {
     },
 
     /// Add Gaussian noise to pixels
-    GaussNoise { mean: f32, std: f32 },
+    GaussNoise { mean: f32, std: f32, seed: u64 },
 
     /// Add multiplicative noise: `pixel = pixel * (1 + noise)`
-    MultiplicativeNoise { multiplier: f32 },
+    MultiplicativeNoise { multiplier: f32, seed: u64 },
 
     /// Salt-and-pepper noise
     SaltAndPepper {
         amount: f32,         // Fraction of pixels to affect
         salt_vs_pepper: f32, // 0.0 = all pepper, 1.0 = all salt
+        seed: u64,
     },
 
     /// Noise with spatial granularity (per-region noise)
@@ -197,6 +198,7 @@ pub enum SampledImageOp {
     CoarseDropout {
         holes: usize,          // Number of holes
         hole_size: (u32, u32), // (height, width) range
+        seed: u64,
     },
 
     /// Grid-based dropout
@@ -204,6 +206,7 @@ pub enum SampledImageOp {
         ratio: f32,     // Fraction of grid to drop
         unit_size: u32, // Size of grid cells
         holes: usize,   // Number of holes
+        seed: u64,
     },
 
     // ========================================================================
@@ -223,7 +226,10 @@ pub enum SampledImageOp {
 
     /// Affine transformation
     Affine {
-        matrix: [f32; 6], // [a, b, c, d, e, f] for affine transform
+        scale: (f32, f32),
+        rotate: f32,
+        translate: (f32, f32),
+        shear: (f32, f32),
         interpolation: Interpolation,
         border_mode: BorderMode,
     },
@@ -418,12 +424,15 @@ impl SampledImageOp {
                 Some(Box::new(Pad::new(*top, *bottom, *left, *right, pad_mode)))
             }
             SampledImageOp::Affine {
-                matrix,
+                scale,
+                rotate,
+                translate,
+                shear,
                 interpolation,
                 border_mode,
             } => {
                 use crate::transforms::geometric::affine::{
-                    AffineBorderMode, AffineInterpolation,
+                    AffineBorderMode, AffineInterpolation, AffineParams,
                 };
                 let affine_interp = match interpolation {
                     Interpolation::Nearest => AffineInterpolation::Nearest,
@@ -437,9 +446,12 @@ impl SampledImageOp {
                     BorderMode::Replicate => AffineBorderMode::Replicate,
                     BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
-                // Matrix is [a, b, c, d, e, f] (inverse mapping).
-                // Recover forward scale/rotation/translation exactly.
-                let params = crate::sampled_ir::ops::affine_params_from_matrix(*matrix);
+                let params = AffineParams {
+                    scale: *scale,
+                    rotate: *rotate,
+                    translate: *translate,
+                    shear: *shear,
+                };
                 Some(Box::new(Affine::with_all(
                     params,
                     0,
@@ -693,7 +705,8 @@ mod tests {
         assert!(!SampledImageOp::ToGray.is_lut_op());
         assert!(!SampledImageOp::GaussNoise {
             mean: 0.0,
-            std: 1.0
+            std: 1.0,
+            seed: 0,
         }
         .is_lut_op());
     }

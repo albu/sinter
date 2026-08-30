@@ -28,6 +28,8 @@ pub struct CoarseDropout {
     pub max_hole_size: (f32, f32), // (width_fraction, height_fraction)
     /// Value to fill holes with
     pub fill_value: u8,
+    /// Per-pipeline seed so different images get different hole layouts.
+    pub seed: u64,
 }
 
 impl CoarseDropout {
@@ -41,6 +43,14 @@ impl CoarseDropout {
     /// # Panics
     /// Panics if max_hole_size values are outside (0.0, 1.0]
     pub fn new(num_holes: u32, max_hole_size: (f32, f32), fill_value: u8) -> Self {
+        Self::with_seed(num_holes, max_hole_size, fill_value, 0)
+    }
+
+    /// Create a new CoarseDropout transform with an explicit per-pipeline seed.
+    ///
+    /// # Panics
+    /// Panics if max_hole_size values are outside (0.0, 1.0]
+    pub fn with_seed(num_holes: u32, max_hole_size: (f32, f32), fill_value: u8, seed: u64) -> Self {
         assert!(
             max_hole_size.0 > 0.0 && max_hole_size.0 <= 1.0,
             "max_hole_size width must be in (0.0, 1.0], got {}",
@@ -55,6 +65,7 @@ impl CoarseDropout {
             num_holes,
             max_hole_size,
             fill_value,
+            seed,
         }
     }
 
@@ -90,13 +101,13 @@ impl CoarseDropout {
         for i in 0..self.num_holes as usize {
             // Random hole size (at least 1x1)
             let hole_w = if max_w > 1 {
-                let r = self.hash(i, 0x123);
+                let r = self.hash(i, self.seed);
                 ((r * (max_w - 1) as f32) as usize) + 1
             } else {
                 1
             };
             let hole_h = if max_h > 1 {
-                let r = self.hash(i + 1000, 0x456);
+                let r = self.hash(i + 1000, self.seed);
                 ((r * (max_h - 1) as f32) as usize) + 1
             } else {
                 1
@@ -104,13 +115,13 @@ impl CoarseDropout {
 
             // Random position
             let x = if width > hole_w {
-                let r = self.hash(i + 2000, 0x789);
+                let r = self.hash(i + 2000, self.seed);
                 (r * (width - hole_w) as f32) as usize
             } else {
                 0
             };
             let y = if height > hole_h {
-                let r = self.hash(i + 3000, 0xabc);
+                let r = self.hash(i + 3000, self.seed);
                 (r * (height - hole_h) as f32) as usize
             } else {
                 0

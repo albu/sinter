@@ -15,10 +15,12 @@ pub fn apply_gauss_noise_neon(
     lut: &[i16; LUT_SIZE],
     strength: i16,
     mean_offset: i16,
+    seed: u64,
 ) {
     use std::arch::aarch64::*;
 
-    let mut rng_state: u64 = 0xDEADBEEF;
+    // Seed 0 would keep xorshift stuck at 0, so map it to a non-zero default.
+    let mut rng_state: u64 = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
 
     let len = data.len();
     let chunks = len / 8;
@@ -103,8 +105,10 @@ pub fn apply_gauss_noise_neon(
     lut: &[i16; LUT_SIZE],
     strength: i16,
     mean_offset: i16,
+    seed: u64,
 ) {
-    let mut rng_state: u64 = 0xDEADBEEF;
+    // Seed 0 would keep xorshift stuck at 0, so map it to a non-zero default.
+    let mut rng_state: u64 = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
 
     for px in data.iter_mut() {
         // Generate random index using xorshift*

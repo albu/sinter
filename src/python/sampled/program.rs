@@ -265,42 +265,65 @@ impl PySampledImageProgram {
     #[pyo3(name = "apply")]
     pub(crate) fn apply<'py>(
         &self,
-        array: &'py PyArray3<u8>,
+        array: &'py PyAny,
         py: Python<'py>,
-    ) -> PyResult<&'py PyArray3<u8>> {
+    ) -> PyResult<&'py PyAny> {
+        use numpy::{PyArray2, PyArray3};
+
         // Convert SampledImageProgram to Plan
         let plan = self.inner.to_plan();
 
         // Optimize the plan
         let exec_plan = Optimizer::new().optimize(plan);
 
-        // Get shape information
-        let shape = array.shape();
-        let (height, width, channels) = (shape[0] as usize, shape[1] as usize, shape[2] as usize);
+        if let Ok(array3) = array.downcast::<PyArray3<u8>>() {
+            // Get shape information
+            let shape = array3.shape();
+            let (height, width, channels) = (shape[0] as usize, shape[1] as usize, shape[2] as usize);
 
-        // Get mutable slice from numpy array
-        let slice = unsafe { array.as_slice_mut()? };
+            // Get mutable slice from numpy array
+            let slice = unsafe { array3.as_slice_mut()? };
 
-        // Create a FusableImage that borrows the numpy data
-        let mut fusable_img = FusableImage::new(slice, width, height, channels);
+            // Create a FusableImage that borrows the numpy data
+            let mut fusable_img = FusableImage::new(slice, width, height, channels);
 
-        // Release GIL during Rust execution - allows other Python threads to run!
-        let result = py.allow_threads(|| exec_plan.execute(&mut fusable_img));
+            // Release GIL during Rust execution - allows other Python threads to run!
+            let result = py.allow_threads(|| exec_plan.execute(&mut fusable_img));
 
-        match result {
-            // Transform allocated a new buffer (e.g., Rotate, Resize)
-            Some(new_barrier) => {
-                // Use the owned version to avoid cloning the Vec
-                crate::python::types::barrier_image_to_numpy_owned(py, new_barrier)
+            match result {
+                Some(new_barrier) => {
+                    let arr = crate::python::types::barrier_image_to_numpy_owned(py, new_barrier)?;
+                    Ok(arr.as_ref())
+                }
+                None => Ok(array3.as_ref()),
             }
-            // Transform was in-place - return the original array (modified in-place!)
-            None => {
-                // Return a reference to the input array - no copy!
-                // SAFETY: The array reference has lifetime 'py which matches the GIL lifetime.
-                // The GIL is held for the duration of this function call, ensuring the
-                // Python object cannot be garbage collected while we hold this reference.
-                Ok(array)
+        } else if let Ok(array2) = array.downcast::<PyArray2<u8>>() {
+            let shape = array2.shape();
+            let (height, width, channels) = (shape[0] as usize, shape[1] as usize, 1);
+
+            let slice = unsafe { array2.as_slice_mut()? };
+            let mut fusable_img = FusableImage::new(slice, width, height, channels);
+
+            let result = py.allow_threads(|| exec_plan.execute(&mut fusable_img));
+
+            match result {
+                Some(new_barrier) => {
+                    let (new_h, new_w) = (new_barrier.height, new_barrier.width);
+                    let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
+                    let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Failed to reshape array: {}",
+                            e
+                        ))
+                    })?;
+                    Ok(array_2d.as_ref())
+                }
+                None => Ok(array2.as_ref()),
             }
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Expected a 2D or 3D uint8 numpy array for 'image'",
+            ))
         }
     }
 

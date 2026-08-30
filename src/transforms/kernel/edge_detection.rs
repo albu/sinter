@@ -134,8 +134,9 @@ impl EdgeDetection {
                         }
                     }
 
-                    // Compute gradient magnitude
-                    let magnitude = ((sum_x * sum_x + sum_y * sum_y) as f64).sqrt() as i32;
+                    // Compute gradient magnitude (f32 sqrt is ~2x faster than f64
+                    // and plenty precise for 8-bit output).
+                    let magnitude = ((sum_x * sum_x + sum_y * sum_y) as f32).sqrt() as i32;
                     output[(y * width + x) * channels + c] = magnitude.clamp(0, 255) as u8;
                 }
             }

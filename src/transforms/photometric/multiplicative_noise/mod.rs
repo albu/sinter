@@ -60,6 +60,8 @@ pub struct MultiplicativeNoise {
     pub multiplier: f32,
     pub std_dev: f32,
     pub granularity: NoiseGranularity,
+    /// Per-pipeline seed so different images get different noise.
+    pub seed: u64,
 }
 
 impl MultiplicativeNoise {
@@ -68,6 +70,15 @@ impl MultiplicativeNoise {
     /// # Panics
     /// Panics if std_dev is negative
     pub fn new(multiplier: f32, std_dev: f32) -> Self {
+        Self::with_seed(multiplier, std_dev, 0)
+    }
+
+    /// Create a new MultiplicativeNoise transform with an explicit
+    /// per-pipeline seed and default granularity (PerVector).
+    ///
+    /// # Panics
+    /// Panics if std_dev is negative
+    pub fn with_seed(multiplier: f32, std_dev: f32, seed: u64) -> Self {
         assert!(
             std_dev >= 0.0,
             "std_dev must be non-negative, got {}",
@@ -77,6 +88,7 @@ impl MultiplicativeNoise {
             multiplier,
             std_dev,
             granularity: NoiseGranularity::default(),
+            seed,
         }
     }
 
@@ -91,6 +103,7 @@ impl MultiplicativeNoise {
             multiplier,
             std_dev,
             granularity,
+            seed: 0,
         }
     }
 
@@ -159,7 +172,7 @@ fn execute_per_pixel(noise: &MultiplicativeNoise, image: &mut FusableImage) {
     let mut noise_factors = Vec::with_capacity(pixel_count);
 
     for i in 0..pixel_count {
-        noise_factors.push(noise.generate_gaussian_fast(i as u64));
+        noise_factors.push(noise.generate_gaussian_fast(noise.seed.wrapping_add(i as u64)));
     }
 
     apply_noise_scalar(image, &noise_factors);
@@ -177,7 +190,7 @@ fn execute_per_block(noise: &MultiplicativeNoise, image: &mut FusableImage, bloc
     // Generate one noise value per block (dramatically fewer RNG calls)
     let mut noise_factors = Vec::with_capacity(total_blocks);
     for i in 0..total_blocks {
-        noise_factors.push(noise.generate_gaussian_fast(i as u64));
+        noise_factors.push(noise.generate_gaussian_fast(noise.seed.wrapping_add(i as u64)));
     }
 
     // Apply noise, reusing value within each block
@@ -205,7 +218,7 @@ fn execute_per_vector(noise: &MultiplicativeNoise, image: &mut FusableImage) {
     // Generate one noise value per 8 pixels (8x fewer RNG calls)
     let mut noise_factors = Vec::with_capacity(vector_count);
     for i in 0..vector_count {
-        noise_factors.push(noise.generate_gaussian_fast(i as u64));
+        noise_factors.push(noise.generate_gaussian_fast(noise.seed.wrapping_add(i as u64)));
     }
 
     // Apply with SIMD - each vector broadcasts one noise value to 8 pixels

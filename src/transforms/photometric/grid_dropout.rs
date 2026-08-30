@@ -28,6 +28,8 @@ pub struct GridDropout {
     pub drop_ratio: f32,
     /// Value to fill cells with
     pub fill_value: u8,
+    /// Per-pipeline seed so different images get different dropped cells.
+    pub seed: u64,
 }
 
 impl GridDropout {
@@ -41,6 +43,14 @@ impl GridDropout {
     /// # Panics
     /// Panics if grid_size values are 0 or if drop_ratio is outside [0.0, 1.0]
     pub fn new(grid_size: (u32, u32), drop_ratio: f32, fill_value: u8) -> Self {
+        Self::with_seed(grid_size, drop_ratio, fill_value, 0)
+    }
+
+    /// Create a new GridDropout transform with an explicit per-pipeline seed.
+    ///
+    /// # Panics
+    /// Panics if grid_size values are 0 or if drop_ratio is outside [0.0, 1.0]
+    pub fn with_seed(grid_size: (u32, u32), drop_ratio: f32, fill_value: u8, seed: u64) -> Self {
         assert!(
             grid_size.0 > 0 && grid_size.1 > 0,
             "grid_size must be positive, got {:?}",
@@ -55,6 +65,7 @@ impl GridDropout {
             grid_size,
             drop_ratio,
             fill_value,
+            seed,
         }
     }
 
@@ -78,15 +89,24 @@ impl GridDropout {
 
         // Use a linear congruential approach to select cells
         // This ensures we get exactly num_drops unique cells
-        let mut step = if total_cells > 1 {
-            // Golden ratio for good distribution
+        let step = if total_cells > 1 {
+            // Golden ratio for good distribution, jittered by the seed.
             (total_cells as f32 * 1.618033988749895) as usize + 1
+                + (self.seed as usize % total_cells.max(1))
         } else {
             1
         };
 
+        // Offset the starting cell by the seed so different pipelines drop
+        // different cells.
+        let start = if total_cells > 1 {
+            self.seed as usize % total_cells
+        } else {
+            0
+        };
+
         for i in 0..num_drops {
-            let cell_idx = (i * step) % total_cells;
+            let cell_idx = (start + i * step) % total_cells;
             let grid_x = cell_idx % grid_w;
             let grid_y = cell_idx / grid_w;
             drops.push((grid_x, grid_y));

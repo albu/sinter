@@ -17,7 +17,7 @@ pub(super) fn execute_rust(affine: &Affine, image: &FusableImage) -> BarrierImag
     let mut transformed_data = vec![0u8; out_width * out_height * channels];
 
     // Build inverse transformation matrix
-    let [a, b, c, d, e, f] = affine.build_inverse_matrix();
+    let [a, b, c, d, e, f] = affine.build_inverse_matrix(in_width, in_height);
 
     match affine.interpolation {
         AffineInterpolation::Nearest => {

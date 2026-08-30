@@ -12,32 +12,34 @@
 /// - `data.len()` is a multiple of 3 (valid RGB data)
 /// - All pointer arithmetic within the function stays within bounds
 #[cfg(target_arch = "aarch64")]
-pub unsafe fn rgb_shift_neon(data: &mut [u8], r_shift: i8, g_shift: i8, b_shift: i8) {
+pub unsafe fn rgb_shift_neon(data: &mut [u8], r_shift: i16, g_shift: i16, b_shift: i16) {
     use std::arch::aarch64::*;
 
-    let pixels_per_iter = 8; // Process 8 pixels at a time
     let len = data.len();
     let mut i = 0;
 
-    // Broadcast shift values to all lanes
-    let r_shift_vec = vdup_n_u8(r_shift as u8);
-    let g_shift_vec = vdup_n_u8(g_shift as u8);
-    let b_shift_vec = vdup_n_u8(b_shift as u8);
+    let r_shift_s16 = vdupq_n_s16(r_shift);
+    let g_shift_s16 = vdupq_n_s16(g_shift);
+    let b_shift_s16 = vdupq_n_s16(b_shift);
 
     // Process 8 pixels (24 bytes) at a time
     while i + 24 <= len {
-        // Load 8 RGB pixels, deinterleave into R, G, B vectors
-        // SAFETY: Loop condition ensures i + 24 <= len, so we have 24 valid bytes
         let rgb = vld3_u8(data.as_ptr().add(i));
 
-        // Apply shifts with saturating addition
-        // vqadd_u8 saturates at 0 and 255
-        let r_out = vqadd_u8(rgb.0, r_shift_vec);
-        let g_out = vqadd_u8(rgb.1, g_shift_vec);
-        let b_out = vqadd_u8(rgb.2, b_shift_vec);
+        // Widen u8 -> u16 -> s16 and add signed shift
+        let r_u16 = vmovl_u8(rgb.0);
+        let g_u16 = vmovl_u8(rgb.1);
+        let b_u16 = vmovl_u8(rgb.2);
 
-        // Store back interleaved - need to construct uint8x8x3_t
-        // SAFETY: i is valid for 24 bytes as ensured by loop condition
+        let r_s16 = vaddq_s16(vreinterpretq_s16_u16(r_u16), r_shift_s16);
+        let g_s16 = vaddq_s16(vreinterpretq_s16_u16(g_u16), g_shift_s16);
+        let b_s16 = vaddq_s16(vreinterpretq_s16_u16(b_u16), b_shift_s16);
+
+        // Saturating narrow s16 -> u8 (clamps [0, 255])
+        let r_out = vqmovun_s16(r_s16);
+        let g_out = vqmovun_s16(g_s16);
+        let b_out = vqmovun_s16(b_s16);
+
         let result = uint8x8x3_t(r_out, g_out, b_out);
         vst3_u8(data.as_mut_ptr().add(i), result);
 
@@ -47,23 +49,23 @@ pub unsafe fn rgb_shift_neon(data: &mut [u8], r_shift: i8, g_shift: i8, b_shift:
     // Handle remaining pixels (must be multiple of 3 for RGB)
     while i + 3 <= len {
         // Use scalar for remaining pixels
-        data[i] = (data[i] as i16 + r_shift as i16).clamp(0, 255) as u8;
-        data[i + 1] = (data[i + 1] as i16 + g_shift as i16).clamp(0, 255) as u8;
-        data[i + 2] = (data[i + 2] as i16 + b_shift as i16).clamp(0, 255) as u8;
+        data[i] = (data[i] as i16 + r_shift).clamp(0, 255) as u8;
+        data[i + 1] = (data[i + 1] as i16 + g_shift).clamp(0, 255) as u8;
+        data[i + 2] = (data[i + 2] as i16 + b_shift).clamp(0, 255) as u8;
         i += 3;
     }
 }
 
 /// Fallback implementation for non-ARM64 platforms
 #[cfg(not(target_arch = "aarch64"))]
-pub unsafe fn rgb_shift_neon(data: &mut [u8], r_shift: i8, g_shift: i8, b_shift: i8) {
+pub unsafe fn rgb_shift_neon(data: &mut [u8], r_shift: i16, g_shift: i16, b_shift: i16) {
     let len = data.len();
     let mut i = 0;
 
     while i + 3 <= len {
-        data[i] = (data[i] as i16 + r_shift as i16).clamp(0, 255) as u8;
-        data[i + 1] = (data[i + 1] as i16 + g_shift as i16).clamp(0, 255) as u8;
-        data[i + 2] = (data[i + 2] as i16 + b_shift as i16).clamp(0, 255) as u8;
+        data[i] = (data[i] as i16 + r_shift).clamp(0, 255) as u8;
+        data[i + 1] = (data[i + 1] as i16 + g_shift).clamp(0, 255) as u8;
+        data[i + 2] = (data[i + 2] as i16 + b_shift).clamp(0, 255) as u8;
         i += 3;
     }
 }

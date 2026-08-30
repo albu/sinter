@@ -111,7 +111,9 @@ impl Executable for Pad {
         let channels = image.channels;
         let stride = image.width * channels;
 
-        let mut padded_data = vec![0u8; new_width as usize * new_height as usize * channels];
+        let len = new_width as usize * new_height as usize * channels;
+        let mut padded_data = Vec::with_capacity(len);
+        unsafe { padded_data.set_len(len); }
 
         match self.mode {
             PadMode::Constant(fill) => {
@@ -218,7 +220,9 @@ impl Executable for Pad {
         let channels = image.channels;
         let stride = image.width * channels;
 
-        let mut padded_data = vec![0u8; new_width as usize * new_height as usize * channels];
+        let len = new_width as usize * new_height as usize * channels;
+        let mut padded_data = Vec::with_capacity(len);
+        unsafe { padded_data.set_len(len); }
 
         match self.mode {
             PadMode::Constant(fill) => {

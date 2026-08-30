@@ -548,6 +548,14 @@ def run_benchmarks():
             print_row("GaussianBlur(3x3)", albumentations_time, sinter_time, speedup)
 
             albumentations_time, sinter_time, speedup = benchmark_transform(
+                "GaussianBlur(5x5)",
+                A.Compose([A.GaussianBlur(blur_limit=(5, 5), p=1.0)]),
+                lambda: GaussianBlur(kernel_size=5),
+                img
+            )
+            print_row("GaussianBlur(5x5)", albumentations_time, sinter_time, speedup)
+
+            albumentations_time, sinter_time, speedup = benchmark_transform(
                 "GaussianBlur(7x7)",
                 A.Compose([A.GaussianBlur(blur_limit=(7, 7), p=1.0)]),
                 lambda: GaussianBlur(kernel_size=7),
@@ -557,21 +565,33 @@ def run_benchmarks():
         else:
             albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(3x3)", None, lambda: GaussianBlur(kernel_size=3), img)
             print_row("GaussianBlur(3x3)", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(5x5)", None, lambda: GaussianBlur(kernel_size=5), img)
+            print_row("GaussianBlur(5x5)", albumentations_time, sinter_time, speedup)
             albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(7x7)", None, lambda: GaussianBlur(kernel_size=7), img)
             print_row("GaussianBlur(7x7)", albumentations_time, sinter_time, speedup)
 
         # MedianBlur - Albumentations equivalent exists
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
-                "MedianBlur",
+                "MedianBlur(3x3)",
                 A.Compose([A.MedianBlur(blur_limit=(3, 3), p=1.0)]),
                 lambda: MedianBlur(kernel_size=3),
                 img
             )
-            print_row("MedianBlur", albumentations_time, sinter_time, speedup)
+            print_row("MedianBlur(3x3)", albumentations_time, sinter_time, speedup)
+
+            albumentations_time, sinter_time, speedup = benchmark_transform(
+                "MedianBlur(5x5)",
+                A.Compose([A.MedianBlur(blur_limit=(5, 5), p=1.0)]),
+                lambda: MedianBlur(kernel_size=5),
+                img
+            )
+            print_row("MedianBlur(5x5)", albumentations_time, sinter_time, speedup)
         else:
-            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur", None, lambda: MedianBlur(kernel_size=3), img)
-            print_row("MedianBlur", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur(3x3)", None, lambda: MedianBlur(kernel_size=3), img)
+            print_row("MedianBlur(3x3)", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur(5x5)", None, lambda: MedianBlur(kernel_size=5), img)
+            print_row("MedianBlur(5x5)", albumentations_time, sinter_time, speedup)
 
         # Sharpen - Albumentations equivalent exists
         if HAS_ALBUMENTATIONS:
