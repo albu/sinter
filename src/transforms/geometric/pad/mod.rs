@@ -407,10 +407,28 @@ fn pad_fast_slice(
         let s_row = unsafe { src_ptr.add(y * src_stride) };
 
         // Left border
-        for px in 0..left {
-            let sx_byte = unsafe { *x_map.get_unchecked(px) };
-            for c in 0..channels {
-                unsafe { *d_row.add(px * channels + c) = *s_row.add(sx_byte + c); }
+        if channels == 1 {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe { *d_row.add(px) = *s_row.add(sx_byte); }
+            }
+        } else if channels == 3 {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    let sp = s_row.add(sx_byte);
+                    let dp = d_row.add(px * 3);
+                    *dp = *sp;
+                    *dp.add(1) = *sp.add(1);
+                    *dp.add(2) = *sp.add(2);
+                }
+            }
+        } else {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(s_row.add(sx_byte), d_row.add(px * channels), channels);
+                }
             }
         }
 
@@ -420,10 +438,28 @@ fn pad_fast_slice(
         }
 
         // Right border
-        for px in (left + src_width)..new_width {
-            let sx_byte = unsafe { *x_map.get_unchecked(px) };
-            for c in 0..channels {
-                unsafe { *d_row.add(px * channels + c) = *s_row.add(sx_byte + c); }
+        if channels == 1 {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe { *d_row.add(px) = *s_row.add(sx_byte); }
+            }
+        } else if channels == 3 {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    let sp = s_row.add(sx_byte);
+                    let dp = d_row.add(px * 3);
+                    *dp = *sp;
+                    *dp.add(1) = *sp.add(1);
+                    *dp.add(2) = *sp.add(2);
+                }
+            }
+        } else {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(s_row.add(sx_byte), d_row.add(px * channels), channels);
+                }
             }
         }
     }

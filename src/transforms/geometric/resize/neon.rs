@@ -415,7 +415,6 @@ fn resize_bilinear_scalar(
 // NEON SIMD Bilinear Implementations
 // ============================================================================
 
-/// Fast 2x downsample for RGB using single-cycle `vrhadd` NEON operations
 #[cfg(target_arch = "aarch64")]
 unsafe fn resize_bilinear_down2_rgb_neon(
     src: &[u8],
@@ -438,38 +437,47 @@ unsafe fn resize_bilinear_down2_rgb_neon(
         let mut x_new = 0;
         let mut in_x = 0;
 
-        while x_new + 2 <= dst_width && in_x + 16 <= src_stride {
-            let r0_0 = std::ptr::read_unaligned(row0.add(in_x) as *const u32);
-            let r0_1 = std::ptr::read_unaligned(row0.add(in_x + 3) as *const u32);
-            let r0_2 = std::ptr::read_unaligned(row0.add(in_x + 6) as *const u32);
-            let r0_3 = std::ptr::read_unaligned(row0.add(in_x + 9) as *const u32);
+        // Process 16 output RGB pixels per iteration (from 32 input RGB pixels = 96 bytes)
+        while x_new + 16 <= dst_width && in_x + 96 <= src_stride {
+            let r0_a = vld3q_u8(row0.add(in_x));
+            let r0_b = vld3q_u8(row0.add(in_x + 48));
+            let r1_a = vld3q_u8(row1.add(in_x));
+            let r1_b = vld3q_u8(row1.add(in_x + 48));
 
-            let r1_0 = std::ptr::read_unaligned(row1.add(in_x) as *const u32);
-            let r1_1 = std::ptr::read_unaligned(row1.add(in_x + 3) as *const u32);
-            let r1_2 = std::ptr::read_unaligned(row1.add(in_x + 6) as *const u32);
-            let r1_3 = std::ptr::read_unaligned(row1.add(in_x + 9) as *const u32);
+            // Red channel
+            let r0_even_r = vuzp1q_u8(r0_a.0, r0_b.0);
+            let r0_odd_r = vuzp2q_u8(r0_a.0, r0_b.0);
+            let r1_even_r = vuzp1q_u8(r1_a.0, r1_b.0);
+            let r1_odd_r = vuzp2q_u8(r1_a.0, r1_b.0);
+            let top_r = vrhaddq_u8(r0_even_r, r0_odd_r);
+            let bot_r = vrhaddq_u8(r1_even_r, r1_odd_r);
+            let final_r = vrhaddq_u8(top_r, bot_r);
 
-            let top0 = vrhadd_u8(vreinterpret_u8_u32(vdup_n_u32(r0_0)), vreinterpret_u8_u32(vdup_n_u32(r0_1)));
-            let bot0 = vrhadd_u8(vreinterpret_u8_u32(vdup_n_u32(r1_0)), vreinterpret_u8_u32(vdup_n_u32(r1_1)));
-            let res0 = vrhadd_u8(top0, bot0);
+            // Green channel
+            let r0_even_g = vuzp1q_u8(r0_a.1, r0_b.1);
+            let r0_odd_g = vuzp2q_u8(r0_a.1, r0_b.1);
+            let r1_even_g = vuzp1q_u8(r1_a.1, r1_b.1);
+            let r1_odd_g = vuzp2q_u8(r1_a.1, r1_b.1);
+            let top_g = vrhaddq_u8(r0_even_g, r0_odd_g);
+            let bot_g = vrhaddq_u8(r1_even_g, r1_odd_g);
+            let final_g = vrhaddq_u8(top_g, bot_g);
 
-            let top1 = vrhadd_u8(vreinterpret_u8_u32(vdup_n_u32(r0_2)), vreinterpret_u8_u32(vdup_n_u32(r0_3)));
-            let bot1 = vrhadd_u8(vreinterpret_u8_u32(vdup_n_u32(r1_2)), vreinterpret_u8_u32(vdup_n_u32(r1_3)));
-            let res1 = vrhadd_u8(top1, bot1);
+            // Blue channel
+            let r0_even_b = vuzp1q_u8(r0_a.2, r0_b.2);
+            let r0_odd_b = vuzp2q_u8(r0_a.2, r0_b.2);
+            let r1_even_b = vuzp1q_u8(r1_a.2, r1_b.2);
+            let r1_odd_b = vuzp2q_u8(r1_a.2, r1_b.2);
+            let top_b = vrhaddq_u8(r0_even_b, r0_odd_b);
+            let bot_b = vrhaddq_u8(r1_even_b, r1_odd_b);
+            let final_b = vrhaddq_u8(top_b, bot_b);
 
-            let val0 = vget_lane_u32::<0>(vreinterpret_u32_u8(res0));
-            let val1 = vget_lane_u32::<0>(vreinterpret_u32_u8(res1));
+            vst3q_u8(
+                dst_row.add(x_new * 3),
+                uint8x16x3_t(final_r, final_g, final_b),
+            );
 
-            let out_p = dst_row.add(x_new * 3);
-            *out_p = val0 as u8;
-            *out_p.add(1) = (val0 >> 8) as u8;
-            *out_p.add(2) = (val0 >> 16) as u8;
-            *out_p.add(3) = val1 as u8;
-            *out_p.add(4) = (val1 >> 8) as u8;
-            *out_p.add(5) = (val1 >> 16) as u8;
-
-            x_new += 2;
-            in_x += 12;
+            x_new += 16;
+            in_x += 96;
         }
 
         while x_new < dst_width {
