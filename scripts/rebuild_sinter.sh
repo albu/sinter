@@ -22,6 +22,7 @@ echo "==> Building wheel (release)"
 
 WHEEL="$(ls -t "$OUT"/sinter-*.whl | head -1)"
 echo "==> Installing $WHEEL"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
 uv pip install --no-deps --force-reinstall --python .venv/bin/python "$WHEEL"
 
 echo "==> Verifying install behavior"
