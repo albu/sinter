@@ -33,11 +33,17 @@ IMAGE_SIZES = [
 KERNEL_SIZES = [3, 5, 7, 13, 21, 31]
 
 # Map kernel sizes to equivalent OpenCV sigma values
-# These match the Pascal binomial kernels' effective sigma
+# For ksize 3/5/7 pass sigma=0: cv2's small_gaussian_tab for these sizes is
+# EXACTLY the Pascal binomial kernel ([1,2,1]/4 etc.) — the identical filter —
+# and sigma=0 selects cv2's optimized fixed-point engine. Passing an explicit
+# sigma instead makes cv2 build a float kernel and run its general (much
+# slower) engine, which understates the cv2 baseline.
+# For multi-pass sizes (13/21/31) there is no single-pass cv2 equivalent, so
+# keep an explicit sigma mapped to the total effective blur.
 SIGMA_MAP = {
-    3: 0.85,   # [1,2,1] Pascal
-    5: 1.08,   # [1,4,6,4,1] Pascal
-    7: 1.28,   # [1,6,15,20,15,6,1] Pascal
+    3: 0,      # cv2 small_gaussian_tab = [1,2,1]/4 (identical filter)
+    5: 0,      # cv2 small_gaussian_tab = [1,4,6,4,1]/16
+    7: 0,      # cv2 small_gaussian_tab = [2,7,14,18,14,7,2]/64
     13: 1.70,  # 2×7×7 multi-pass (variance addition)
     21: 2.08,  # 3×7×7 multi-pass
     31: 2.68,  # 5×7×7 multi-pass
