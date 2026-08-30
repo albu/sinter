@@ -254,190 +254,175 @@ pub(crate) unsafe fn convolve_separable_neon_3(
         return;
     }
 
-    let mut temp = vec![0u8; data.len()];
-    let radius = 1;
-    const TILE: usize = 16;
+    // ============================================================================
+    // FUSED rolling separable [1 2 1] x [1 2 1]:
+    //   horizontal -> 3-row planar buffer, vertical emitted one row behind,
+    //   so `data` is read once and written once (halves memory traffic vs the
+    //   two-pass version, which is the bottleneck for this memory-bound op).
+    // ============================================================================
+    let mut output = vec![0u8; data.len()];
+    let plane = width; // bytes per channel plane per row
+    let slot_bytes = 3 * plane;
     let row_bytes = width * 3;
+    let mut h_buf = vec![0u8; 3 * slot_bytes];
 
-    // ============================================================================
-    // HORIZONTAL PASS: u8 → u8 (process 16 RGB pixels per iteration)
-    // ============================================================================
+    unsafe fn horizontal_planar(
+        data: &[u8],
+        sy: usize,
+        width: usize,
+        h_buf: &mut [u8],
+        slot: usize,
+        plane: usize,
+        slot_bytes: usize,
+    ) {
+        let row_offset = sy * width * 3;
+        let base = slot * slot_bytes;
+        const TILE: usize = 16;
 
-    for y in 0..height {
-        let row_offset = y * row_bytes;
-
-        // Handle left edge
-        for x in 0..width.min(radius) {
-            for c in 0..3 {
-                let mut sum: u32 = 0;
-                for k in 0..3 {
-                    let px =
-                        (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                    sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 2, 1][k]);
-                }
-                temp[row_offset + x * 3 + c] = (sum >> 2) as u8;
+        // Left edge (x = 0)
+        for c in 0..3 {
+            let mut sum: u32 = 0;
+            for k in 0..3 {
+                let px = (k as i32 - 1).clamp(0, width as i32 - 1) as usize;
+                sum += data[row_offset + px * 3 + c] as u32 * [1, 2, 1][k];
             }
+            h_buf[base + c * plane] = (sum >> 2) as u8;
         }
 
-        // SIMD middle - process 16 pixels at a time
-        let simd_start = radius;
-        let simd_end = width.saturating_sub(radius);
-        let simd_chunks = if simd_end > simd_start {
+        // SIMD middle
+        let simd_start = 1usize;
+        let simd_end = width.saturating_sub(1);
+        let chunks = if simd_end > simd_start {
             (simd_end - simd_start) / TILE
         } else {
             0
         };
+        for chunk in 0..chunks {
+            let bx = simd_start + chunk * TILE;
+            let p0 = vld3q_u8(data.as_ptr().add(row_offset + (bx - 1) * 3) as *const u8);
+            let p1 = vld3q_u8(data.as_ptr().add(row_offset + bx * 3) as *const u8);
+            let p2 = vld3q_u8(data.as_ptr().add(row_offset + (bx + 1) * 3) as *const u8);
 
-        let mut simd_processed_end = simd_start;
+            let r = vcombine_u8(blur3_u8_lo(p0.0, p1.0, p2.0), blur3_u8_hi(p0.0, p1.0, p2.0));
+            let g = vcombine_u8(blur3_u8_lo(p0.1, p1.1, p2.1), blur3_u8_hi(p0.1, p1.1, p2.1));
+            let b = vcombine_u8(blur3_u8_lo(p0.2, p1.2, p2.2), blur3_u8_hi(p0.2, p1.2, p2.2));
 
-        for chunk in 0..simd_chunks {
-            let base_x = simd_start + chunk * TILE;
-            let out_offset = row_offset + base_x * 3;
+            vst1q_u8(h_buf.as_mut_ptr().add(base + bx), r);
+            vst1q_u8(h_buf.as_mut_ptr().add(base + plane + bx), g);
+            vst1q_u8(h_buf.as_mut_ptr().add(base + 2 * plane + bx), b);
+        }
 
-            // Load three 16-pixel RGB chunks: x-1, x, x+1
-            let p0 = vld3q_u8(data.as_ptr().add(row_offset + (base_x - 1) * 3) as *const u8);
-            let p1 = vld3q_u8(data.as_ptr().add(row_offset + base_x * 3) as *const u8);
-            let p2 = vld3q_u8(data.as_ptr().add(row_offset + (base_x + 1) * 3) as *const u8);
+        // Remainder + right edge (scalar, clamped)
+        for x in (simd_start + chunks * TILE)..width {
+            for c in 0..3 {
+                let mut sum: u32 = 0;
+                for k in 0..3 {
+                    let px = (x as i32 + k as i32 - 1).clamp(0, width as i32 - 1) as usize;
+                    sum += data[row_offset + px * 3 + c] as u32 * [1, 2, 1][k];
+                }
+                h_buf[base + c * plane + x] = (sum >> 2) as u8;
+            }
+        }
+    }
 
-            // Process low 8 pixels: [1 2 1] kernel
-            let r_lo = blur3_u8_lo(p0.0, p1.0, p2.0);
-            let g_lo = blur3_u8_lo(p0.1, p1.1, p2.1);
-            let b_lo = blur3_u8_lo(p0.2, p1.2, p2.2);
+    unsafe fn vertical_emit(
+        h_buf: &[u8],
+        s0: usize,
+        s1: usize,
+        s2: usize,
+        width: usize,
+        output: &mut [u8],
+        oy: usize,
+        row_bytes: usize,
+        plane: usize,
+        slot_bytes: usize,
+    ) {
+        let out_row = oy * row_bytes;
+        let b0 = s0 * slot_bytes;
+        let b1 = s1 * slot_bytes;
+        let b2 = s2 * slot_bytes;
+        const TILE: usize = 16;
 
-            // Process high 8 pixels
-            let r_hi = blur3_u8_hi(p0.0, p1.0, p2.0);
-            let g_hi = blur3_u8_hi(p0.1, p1.1, p2.1);
-            let b_hi = blur3_u8_hi(p0.2, p1.2, p2.2);
+        // Left edge (x = 0)
+        for c in 0..3 {
+            let mut sum: u32 = 0;
+            sum += h_buf[b0 + c * plane] as u32 * 1;
+            sum += h_buf[b1 + c * plane] as u32 * 2;
+            sum += h_buf[b2 + c * plane] as u32 * 1;
+            output[out_row + c] = (sum >> 2) as u8;
+        }
 
-            // Store low 8 pixels
-            let rgb_out_lo = uint8x8x3_t(r_lo, g_lo, b_lo);
-            vst3_u8(temp.as_mut_ptr().add(out_offset) as *mut u8, rgb_out_lo);
+        // SIMD middle
+        let simd_start = 1usize;
+        let simd_end = width.saturating_sub(1);
+        let chunks = if simd_end > simd_start {
+            (simd_end - simd_start) / TILE
+        } else {
+            0
+        };
+        for chunk in 0..chunks {
+            let bx = simd_start + chunk * TILE;
+            let mut rgb = [vdupq_n_u8(0); 3];
+            for c in 0..3 {
+                let v0 = vld1q_u8(h_buf.as_ptr().add(b0 + c * plane + bx));
+                let v1 = vld1q_u8(h_buf.as_ptr().add(b1 + c * plane + bx));
+                let v2 = vld1q_u8(h_buf.as_ptr().add(b2 + c * plane + bx));
+                rgb[c] = vcombine_u8(
+                    blur3_scalar_to_u8(vget_low_u8(v0), vget_low_u8(v1), vget_low_u8(v2)),
+                    blur3_scalar_to_u8(vget_high_u8(v0), vget_high_u8(v1), vget_high_u8(v2)),
+                );
+            }
+            vst3q_u8(output.as_mut_ptr().add(out_row + bx * 3), uint8x16x3_t(rgb[0], rgb[1], rgb[2]));
+        }
 
-            // Store high 8 pixels
-            let rgb_out_hi = uint8x8x3_t(r_hi, g_hi, b_hi);
-            vst3_u8(
-                temp.as_mut_ptr().add(out_offset + 8 * 3) as *mut u8,
-                rgb_out_hi,
+        // Remainder + right edge (scalar)
+        for x in (simd_start + chunks * TILE)..width {
+            for c in 0..3 {
+                let mut sum: u32 = 0;
+                sum += h_buf[b0 + c * plane + x] as u32 * 1;
+                sum += h_buf[b1 + c * plane + x] as u32 * 2;
+                sum += h_buf[b2 + c * plane + x] as u32 * 1;
+                output[out_row + x * 3 + c] = (sum >> 2) as u8;
+            }
+        }
+    }
+
+    // Process virtual rows 0..=height; h[row] for the clamped source row, then
+    // emit the vertical output for row y-1 once h[y-2..y] are available.
+    for y in 0..=height {
+        let sy = y.min(height - 1);
+        let slot = y % 3;
+        horizontal_planar(data, sy, width, &mut h_buf, slot, plane, slot_bytes);
+        if y == 1 {
+            // Top border row 0: clamped window rows 0,0,1 (h[0] in slot 0,
+            // h[1] in slot 1).
+            vertical_emit(
+                &h_buf,
+                0,
+                0,
+                1,
+                width,
+                &mut output,
+                0,
+                row_bytes,
+                plane,
+                slot_bytes,
             );
-
-            simd_processed_end = base_x + TILE;
         }
-
-        // Handle middle pixels that SIMD didn't process (scalar fallback)
-        for x in simd_processed_end..simd_end {
-            for c in 0..3 {
-                let mut sum: u32 = 0;
-                for k in 0..3 {
-                    let px =
-                        (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                    sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 2, 1][k]);
-                }
-                temp[row_offset + x * 3 + c] = (sum >> 2) as u8;
-            }
-        }
-
-        // Handle right edge
-        for x in simd_end..width {
-            for c in 0..3 {
-                let mut sum: u32 = 0;
-                for k in 0..3 {
-                    let px =
-                        (x as i32 + k as i32 - radius as i32).clamp(0, width as i32 - 1) as usize;
-                    sum = sum.wrapping_add(data[row_offset + px * 3 + c] as u32 * [1u32, 2, 1][k]);
-                }
-                temp[row_offset + x * 3 + c] = (sum >> 2) as u8;
-            }
-        }
-    }
-
-    // ============================================================================
-    // VERTICAL PASS: u8 → u8 with SYMMETRIC FOLDING and FULL ROW PROCESSING
-    // OPTIMIZATION 1: (row[-1] + row[1]) + (row[0] << 1) >> 2 instead of multiply
-    // OPTIMIZATION 2: Process FULL ROW at once for cache efficiency (not column blocks)
-    // This is critical for large images - we read each row only once instead of N times!
-    // ============================================================================
-    let mut output = vec![0u8; data.len()];
-    const SIMD_WIDTH: usize = 16; // Process 16 bytes at a time
-
-    // Top edge - scalar (first row only for radius=1)
-    for y in 0..height.min(radius) {
-        for i in 0..row_bytes {
-            let mut sum: u32 = 0;
-            for k in 0..3 {
-                let py = (y as i32 + k as i32 - radius as i32).clamp(0, height as i32 - 1) as usize;
-                sum = sum.wrapping_add(temp[py * row_bytes + i] as u32 * [1u32, 2, 1][k]);
-            }
-            output[y * row_bytes + i] = (sum >> 2) as u8;
-        }
-    }
-
-    // Middle rows - process full row with SIMD (16 bytes at a time)
-    let simd_start = radius;
-    let simd_end = height.saturating_sub(radius);
-
-    for y in simd_start..simd_end {
-        let row_minus1 = temp.as_ptr().add((y - 1) * row_bytes);
-        let row0 = temp.as_ptr().add(y * row_bytes);
-        let row1 = temp.as_ptr().add((y + 1) * row_bytes);
-        let out_row = output.as_mut_ptr().add(y * row_bytes);
-
-        // Process in chunks of SIMD_WIDTH bytes
-        let mut byte_idx = 0;
-        let simd_chunks = row_bytes / SIMD_WIDTH;
-
-        for _ in 0..simd_chunks {
-            // Load 16 u8 values from each of the 3 rows
-            let v_minus1 = vld1q_u8(row_minus1.add(byte_idx));
-            let v0 = vld1q_u8(row0.add(byte_idx));
-            let v1 = vld1q_u8(row1.add(byte_idx));
-
-            // CRITICAL: Widen to u16 BEFORE arithmetic to avoid overflow!
-            // [1 2 1] kernel with symmetric folding: (row[-1] + row[1]) + (row[0] << 1), then >> 2
-            let v_minus1_16 = vmovl_u8(vget_low_u8(v_minus1)); // 8 x u16
-            let v0_16 = vmovl_u8(vget_low_u8(v0)); // 8 x u16
-            let v1_16 = vmovl_u8(vget_low_u8(v1)); // 8 x u16
-
-            let v_minus1_16_hi = vmovl_u8(vget_high_u8(v_minus1)); // 8 x u16
-            let v0_16_hi = vmovl_u8(vget_high_u8(v0)); // 8 x u16
-            let v1_16_hi = vmovl_u8(vget_high_u8(v1)); // 8 x u16
-
-            // (row[-1] + row[1]) + (row[0] << 1)
-            let sum_lo = vaddq_u16(v_minus1_16, v1_16);
-            let center_lo = vshlq_n_u16(v0_16, 1);
-            let total_lo = vaddq_u16(sum_lo, center_lo);
-
-            let sum_hi = vaddq_u16(v_minus1_16_hi, v1_16_hi);
-            let center_hi = vshlq_n_u16(v0_16_hi, 1);
-            let total_hi = vaddq_u16(sum_hi, center_hi);
-
-            // >> 2 and narrow to u8
-            let result_lo = vshrn_n_u16(total_lo, 2);
-            let result_hi = vshrn_n_u16(total_hi, 2);
-            let result = vcombine_u8(result_lo, result_hi);
-
-            vst1q_u8(out_row.add(byte_idx), result);
-            byte_idx += SIMD_WIDTH;
-        }
-
-        // Handle remaining bytes (scalar)
-        for i in byte_idx..row_bytes {
-            let mut sum: u32 = 0;
-            sum = sum.wrapping_add(temp[(y - 1) * row_bytes + i] as u32 * 1);
-            sum = sum.wrapping_add(temp[y * row_bytes + i] as u32 * 2);
-            sum = sum.wrapping_add(temp[(y + 1) * row_bytes + i] as u32 * 1);
-            output[y * row_bytes + i] = (sum >> 2) as u8;
-        }
-    }
-
-    // Bottom edge - scalar (last row only for radius=1)
-    for y in simd_end.max(radius)..height {
-        for i in 0..row_bytes {
-            let mut sum: u32 = 0;
-            for k in 0..3 {
-                let py = (y as i32 + k as i32 - radius as i32).clamp(0, height as i32 - 1) as usize;
-                sum = sum.wrapping_add(temp[py * row_bytes + i] as u32 * [1u32, 2, 1][k]);
-            }
-            output[y * row_bytes + i] = (sum >> 2) as u8;
+        if y >= 2 {
+            let oy = y - 1;
+            vertical_emit(
+                &h_buf,
+                (y - 2) % 3,
+                (y - 1) % 3,
+                y % 3,
+                width,
+                &mut output,
+                oy,
+                row_bytes,
+                plane,
+                slot_bytes,
+            );
         }
     }
 
@@ -576,5 +561,86 @@ unsafe fn convolve_separable_gray_neon_3(image: &mut FusableImage) {
             let p2 = *next_ptr.add(x) as u32;
             *out_ptr.add(x) = ((p0 + p1 * 2 + p2 + 2) >> 2) as u8;
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod fused_tests {
+    use super::*;
+    use crate::core::FusableImage;
+
+    fn scalar_two_pass(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let ch = 3usize;
+        let mut h = vec![0u8; data.len()];
+        // horizontal [1 2 1] >> 2 (truncate)
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..ch {
+                    let mut sum: u32 = 0;
+                    for k in 0..3 {
+                        let px = (x as i32 + k as i32 - 1).clamp(0, width as i32 - 1) as usize;
+                        sum += data[(y * width + px) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    h[(y * width + x) * ch + c] = (sum >> 2) as u8;
+                }
+            }
+        }
+        let mut out = vec![0u8; data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..ch {
+                    let mut sum: u32 = 0;
+                    for k in 0..3 {
+                        let py = (y as i32 + k as i32 - 1).clamp(0, height as i32 - 1) as usize;
+                        sum += h[(py * width + x) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    out[(y * width + x) * ch + c] = (sum >> 2) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_fused_3x3_matches_scalar() {
+        let (w, h) = (32usize, 32usize);
+        let mut data: Vec<u8> = (0..w * h * 3)
+            .map(|i| ((i as u64 * 2654435761) % 256) as u8)
+            .collect();
+        let expected = scalar_two_pass(&data, w, h);
+
+        let mut img = FusableImage::new(&mut data, w, h, 3);
+        unsafe {
+            convolve_separable_neon_3(&mut img, &[1, 2, 1], 4);
+        }
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for i in 0..data.len() {
+            let diff = (data[i] as i32 - expected[i] as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 8 {
+                    let px = i / 3;
+                    eprintln!(
+                        "  idx={} (x={}, y={}, c={}): fused={} expected={}",
+                        i,
+                        px % w,
+                        px / w,
+                        i % 3,
+                        data[i],
+                        expected[i]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            mismatches,
+            0,
+            "fused 3x3 mismatch: {} mismatches, max_diff={}",
+            mismatches,
+            max_diff
+        );
     }
 }

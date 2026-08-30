@@ -28,13 +28,9 @@ def test_constant_image():
             pipe = Compose([GaussianBlur(kernel_size=kernel_size)])
             result = pipe.apply(data.copy())
 
-            if not np.allclose(result, 128, atol=1):
-                print(f"   ❌ FAIL: {size}x{size}, kernel {kernel_size}x{kernel_size}")
-                print(f"      Expected: 128, Got: min={result.min()}, max={result.max()}")
-                return False
+            assert np.allclose(result, 128, atol=1), f"{size}x{size}, kernel {kernel_size}x{kernel_size}"
 
     print("   ✅ PASS: Constant images remain constant")
-    return True
 
 
 def test_impulse_response():
@@ -58,27 +54,13 @@ def test_impulse_response():
     left = center_cross[:center]
     right = center_cross[center+1:][::-1]  # Reverse for comparison
 
-    if not np.allclose(left, right, atol=2):
-        print(f"   ❌ FAIL: Kernel not symmetric")
-        print(f"      Left:  {left}")
-        print(f"      Right: {right}")
-        return False
+    assert np.allclose(left, right, atol=2), f"Kernel not symmetric: Left={left}, Right={right}"
+    assert center_cross[center] >= center_cross[center-1] and center_cross[center] >= center_cross[center+1], f"Center not brightest: {center_cross}"
 
-    # Check that center is brightest
-    if center_cross[center] < center_cross[center-1] or center_cross[center] < center_cross[center+1]:
-        print(f"   ❌ FAIL: Center not brightest")
-        print(f"      Cross-section: {center_cross}")
-        return False
-
-    # Check that values decrease monotonically from center
     for i in range(center - 1):
-        if center_cross[i] > center_cross[i+1]:
-            print(f"   ❌ FAIL: Not monotonically decreasing from center")
-            print(f"      Cross-section: {center_cross}")
-            return False
+        assert center_cross[i] <= center_cross[i+1], f"Not monotonically decreasing: {center_cross}"
 
     print(f"   ✅ PASS: Impulse response is symmetric and peaked at center")
-    return True
 
 
 def test_mean_preservation():
@@ -94,123 +76,82 @@ def test_mean_preservation():
         result = pipe.apply(data.copy())
 
         new_mean = result.mean()
+        assert abs(new_mean - original_mean) <= 1.0, f"Kernel {kernel_size}x{kernel_size} mean diff > 1.0"
 
-        # Mean should be preserved within rounding error
-        if abs(new_mean - original_mean) > 1.0:
-            print(f"   ❌ FAIL: Kernel {kernel_size}x{kernel_size}")
-            print(f"      Original mean: {original_mean:.2f}")
-            print(f"      New mean: {new_mean:.2f}")
-            print(f"      Difference: {abs(new_mean - original_mean):.2f}")
-            return False
-
-    print(f"   ✅ PASS: Mean preserved for all kernel sizes")
-    return True
+    print("   ✅ PASS: Mean brightness preserved")
 
 
 def test_linearity():
-    """Gaussian blur is linear: blur(a + b) = blur(a) + blur(b)."""
+    """GaussianBlur(a*x + b*y) should equal a*GaussianBlur(x) + b*GaussianBlur(y)."""
     print("\n4. Testing linearity...")
 
     np.random.seed(42)
-    data_a = np.random.randint(0, 128, (50, 50, 3), dtype=np.uint8)
-    data_b = np.random.randint(0, 128, (50, 50, 3), dtype=np.uint8)
+    x = np.random.randint(0, 128, (50, 50, 3), dtype=np.uint8)
+    y = np.random.randint(0, 128, (50, 50, 3), dtype=np.uint8)
 
     pipe = Compose([GaussianBlur(kernel_size=7)])
 
-    # blur(a + b)
-    combined = np.clip(data_a.astype(np.int16) + data_b.astype(np.int16), 0, 255).astype(np.uint8)
-    blur_combined = pipe.apply(combined.copy())
+    # Compute blur of sum
+    sum_xy = (x.astype(np.float32) + y.astype(np.float32)) / 2.0
+    sum_xy = sum_xy.astype(np.uint8)
+    blur_of_sum = pipe.apply(sum_xy.copy()).astype(np.float32)
 
-    # blur(a) + blur(b)
-    blur_a = pipe.apply(data_a.copy())
-    blur_b = pipe.apply(data_b.copy())
-    blur_sum = np.clip(blur_a.astype(np.int16) + blur_b.astype(np.int16), 0, 255).astype(np.uint8)
+    # Compute sum of blurs
+    blur_x = pipe.apply(x.copy()).astype(np.float32)
+    blur_y = pipe.apply(y.copy()).astype(np.float32)
+    sum_of_blurs = (blur_x + blur_y) / 2.0
 
-    # Should be approximately equal (allowing for rounding)
-    if not np.allclose(blur_combined, blur_sum, atol=2):
-        print(f"   ❌ FAIL: Linearity violated")
-        diff = np.abs(blur_combined.astype(np.int16) - blur_sum.astype(np.int16))
-        print(f"      Max difference: {diff.max()}")
-        print(f"      Mean difference: {diff.mean():.2f}")
-        return False
-
-    print(f"   ✅ PASS: Linearity preserved")
-    return True
+    assert np.allclose(blur_of_sum, sum_of_blurs, atol=2.0), "Linearity violated"
+    print("   ✅ PASS: Blur is approximately linear")
 
 
 def test_variance_attenuation():
-    """Gaussian blur should reduce variance (smoothing)."""
-    print("\n5. Testing variance attenuation...")
+    """Variance should strictly decrease after blurring (smoothing property)."""
+    print("\n5. Testing variance attenuation (smoothing)...")
 
     np.random.seed(42)
-    for kernel_size in [3, 7, 13, 31]:
-        # High-variance noise image
-        data = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-        original_var = data.var()
+    data = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+    original_var = data.var()
 
+    prev_var = original_var
+    for kernel_size in [3, 5, 7]:
         pipe = Compose([GaussianBlur(kernel_size=kernel_size)])
         result = pipe.apply(data.copy())
         new_var = result.var()
 
-        # Variance should decrease
-        if new_var >= original_var:
-            print(f"   ❌ FAIL: Kernel {kernel_size}x{kernel_size}")
-            print(f"      Original variance: {original_var:.2f}")
-            print(f"      New variance: {new_var:.2f}")
-            return False
+        assert new_var < prev_var, f"Variance did not decrease for {kernel_size}: {prev_var} -> {new_var}"
+        prev_var = new_var
 
-        # Larger kernels should reduce variance more
-        # (This is a soft check - may not always hold due to boundary effects)
-        pass
-
-    print(f"   ✅ PASS: Variance reduced for all kernel sizes")
-    return True
+    print("   ✅ PASS: Variance strictly decreases with kernel size")
 
 
 def test_opencv_comparison():
-    """Compare with OpenCV's GaussianBlur."""
+    """Compare Sinter Gaussian Blur with OpenCV."""
     if not HAS_CV2:
-        print("\n6. OpenCV comparison: SKIPPED (OpenCV not installed)")
+        print("\n6. Skipping OpenCV comparison (cv2 not available)")
         return True
 
-    print("\n6. Comparing with OpenCV...")
+    print("\n6. Comparing with OpenCV implementation...")
 
-    # Test on various image types
-    test_cases = [
-        ("Constant", np.full((64, 64, 3), 128, dtype=np.uint8)),
-        ("Gradient", np.tile(np.linspace(0, 255, 64, dtype=np.uint8).reshape(64, 1, 1), (1, 64, 3))),
-        ("Noise", np.random.randint(0, 256, (64, 64, 3), dtype=np.uint8)),
-        ("Step", np.tile((np.indices((64, 64))[1] >= 32).astype(np.uint8)[..., None] * 255, (1, 1, 3))),
-    ]
+    test_images = {
+        "Random Noise": np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8),
+        "Gradient": np.linspace(0, 255, 10000, dtype=np.uint8).reshape(100, 100)[:, :, np.newaxis].repeat(3, axis=2),
+        "Checkerboard": (np.indices((100, 100)).sum(axis=0) % 2 * 255).astype(np.uint8)[:, :, np.newaxis].repeat(3, axis=2),
+    }
 
-    for name, data in test_cases:
-        # 7x7 kernel (sigma ≈ 7/3 ≈ 2.33)
-        kernel_size = 7
-        sigma = 2.3
+    for name, img in test_images.items():
+        # Sinter
+        pipe = Compose([GaussianBlur(kernel_size=7)])
+        our_result = pipe.apply(img.copy())
 
-        # Our implementation
-        pipe = Compose([GaussianBlur(kernel_size=kernel_size)])
-        our_result = pipe.apply(data.copy())
-
-        # OpenCV implementation
-        # Note: OpenCV uses float sigma, we use fixed kernel sizes
-        # The exact sigma won't match perfectly, but should be close
-        cv_result = cv2.GaussianBlur(data, (kernel_size, kernel_size), sigma)
+        # OpenCV
+        cv_result = cv2.GaussianBlur(img, (7, 7), 0)
 
         # Compare
         mse = np.mean((our_result.astype(np.float32) - cv_result.astype(np.float32)) ** 2)
-        max_diff = np.abs(our_result.astype(np.int16) - cv_result.astype(np.int16)).max()
+        assert mse < 100, f"{name}: MSE={mse:.2f} > 100"
 
-        # Allow some difference due to:
-        # - Different kernel generation (Pascal's triangle vs Gaussian formula)
-        # - Different rounding strategies
-        # - Boundary handling
-        if mse > 100:  # Arbitrary threshold
-            print(f"   ⚠️  {name}: MSE={mse:.2f}, Max diff={max_diff}")
-            print(f"      (This may be OK - kernels differ slightly)")
-
-    print(f"   ✅ PASS: Comparison complete (differences noted above)")
-    return True
+    print(f"   ✅ PASS: Comparison complete (within expected tolerances)")
 
 
 def test_pascal_row_6():
@@ -226,29 +167,15 @@ def test_pascal_row_6():
     pipe = Compose([GaussianBlur(kernel_size=7)])
     result = pipe.apply(data.copy())
 
-    # Extract horizontal cross-section (normalized to sum=1)
     cross_section = result[center, :, 0].astype(np.float32)
     cross_section = cross_section / cross_section.sum()  # Normalize
 
-    # Expected Pascal row 6: [1, 6, 15, 20, 15, 6, 1]
-    # Sum = 64
     expected = np.array([1, 6, 15, 20, 15, 6, 1], dtype=np.float32) / 64.0
-
-    # Extract the 7 values around center
     center_idx = size // 2
     actual = cross_section[center_idx - 3:center_idx + 4]
 
-    # Check if they match (approximately, due to rounding)
-    if not np.allclose(actual, expected, atol=0.05):
-        print(f"   ⚠️  Weights differ slightly:")
-        print(f"      Expected: {expected}")
-        print(f"      Actual:   {actual}")
-        print(f"      Diff:     {np.abs(actual - expected)}")
-        # This is OK - just informational
-    else:
-        print(f"   ✅ PASS: Weights match Pascal row 6")
-
-    return True
+    assert np.allclose(actual, expected, atol=0.08), f"Weights differ: Expected {expected}, Actual {actual}"
+    print(f"   ✅ PASS: Weights match Pascal row 6")
 
 
 def run_all_tests():

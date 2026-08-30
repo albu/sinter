@@ -257,3 +257,52 @@ mod tests {
         assert!((new_mean as i32 - original_mean as i32).abs() <= 1);
     }
 }
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod fused_path_tests {
+    use super::*;
+    use crate::core::FusableImage;
+
+    #[test]
+    fn test_full_gaussian3_correct() {
+        let (w, h) = (256usize, 256usize);
+        let mut data: Vec<u8> = (0..w * h * 3)
+            .map(|i| ((i as u64 * 2654435761) % 256) as u8)
+            .collect();
+        let original = data.clone();
+        let mut img = FusableImage::new(&mut data, w, h, 3);
+        GaussianBlur::with_kernel_size(KernelSize::Size3).execute(&mut img);
+
+        // scalar two-pass reference
+        let ch = 3usize;
+        let mut htmp = vec![0u8; original.len()];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..ch {
+                    let mut s: u32 = 0;
+                    for k in 0..3 {
+                        let px = (x as i32 + k as i32 - 1).clamp(0, w as i32 - 1) as usize;
+                        s += original[(y * w + px) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    htmp[(y * w + x) * ch + c] = (s >> 2) as u8;
+                }
+            }
+        }
+        let mut expected = vec![0u8; original.len()];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..ch {
+                    let mut s: u32 = 0;
+                    for k in 0..3 {
+                        let py = (y as i32 + k as i32 - 1).clamp(0, h as i32 - 1) as usize;
+                        s += htmp[(py * w + x) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    expected[(y * w + x) * ch + c] = (s >> 2) as u8;
+                }
+            }
+        }
+        let mm = data.iter().zip(expected.iter()).filter(|(a, b)| a != b).count();
+        let mx = data.iter().zip(expected.iter()).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap_or(0);
+        assert_eq!(mm, 0, "full GaussianBlur3 mismatch: {} px, max_diff={}", mm, mx);
+    }
+}
