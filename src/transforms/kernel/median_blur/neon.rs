@@ -1,5 +1,3 @@
-// ARM NEON SIMD implementation of 3x3 median filter using a 19-op sorting network.
-
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
@@ -16,28 +14,48 @@ unsafe fn vcas(a: &mut uint8x16_t, b: &mut uint8x16_t) {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn vmedian9(
-    mut p0: uint8x16_t,
-    mut p1: uint8x16_t,
-    mut p2: uint8x16_t,
-    mut p3: uint8x16_t,
-    mut p4: uint8x16_t,
-    mut p5: uint8x16_t,
-    mut p6: uint8x16_t,
-    mut p7: uint8x16_t,
-    mut p8: uint8x16_t,
-) -> uint8x16_t {
-    vcas(&mut p1, &mut p2); vcas(&mut p4, &mut p5); vcas(&mut p7, &mut p8);
-    vcas(&mut p0, &mut p1); vcas(&mut p3, &mut p4); vcas(&mut p6, &mut p7);
-    vcas(&mut p1, &mut p2); vcas(&mut p4, &mut p5); vcas(&mut p7, &mut p8);
-    vcas(&mut p0, &mut p3); vcas(&mut p5, &mut p8); vcas(&mut p4, &mut p7);
-    vcas(&mut p3, &mut p6); vcas(&mut p1, &mut p4); vcas(&mut p2, &mut p5);
-    vcas(&mut p4, &mut p7); vcas(&mut p4, &mut p2); vcas(&mut p6, &mut p4);
-    vcas(&mut p4, &mut p2);
-    p4
+unsafe fn sort3(
+    a: uint8x16_t,
+    b: uint8x16_t,
+    c: uint8x16_t,
+) -> (uint8x16_t, uint8x16_t, uint8x16_t) {
+    let min_ab = vminq_u8(a, b);
+    let max_ab = vmaxq_u8(a, b);
+    let min_all = vminq_u8(min_ab, c);
+    let max_temp = vmaxq_u8(min_ab, c);
+    let mid_all = vminq_u8(max_ab, max_temp);
+    let max_all = vmaxq_u8(max_ab, c);
+    (min_all, mid_all, max_all)
 }
 
-/// Apply 3x3 median filter using ARM NEON vectorization
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn mid3(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t) -> uint8x16_t {
+    let min_ab = vminq_u8(a, b);
+    let max_ab = vmaxq_u8(a, b);
+    vminq_u8(max_ab, vmaxq_u8(min_ab, c))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn median_of_3_sorted_columns(
+    min0: uint8x16_t,
+    mid0: uint8x16_t,
+    max0: uint8x16_t,
+    min1: uint8x16_t,
+    mid1: uint8x16_t,
+    max1: uint8x16_t,
+    min2: uint8x16_t,
+    mid2: uint8x16_t,
+    max2: uint8x16_t,
+) -> uint8x16_t {
+    let max_min = vmaxq_u8(vmaxq_u8(min0, min1), min2);
+    let min_max = vminq_u8(vminq_u8(max0, max1), max2);
+    let mid_mid = mid3(mid0, mid1, mid2);
+    mid3(max_min, mid_mid, min_max)
+}
+
+/// Apply 3x3 median filter using ARM NEON column-cache sorting network
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn apply_median_blur_3x3_neon(
     data: &mut [u8],
@@ -55,7 +73,7 @@ pub unsafe fn apply_median_blur_3x3_neon(
     output.set_len(len);
     let stride = width * channels;
 
-    // 1. Process top and bottom border rows with scalar
+    // 1. Top and bottom border rows (scalar)
     for y in [0, height - 1] {
         let y_prev = y.saturating_sub(1);
         let y_next = (y + 1).min(height - 1);
@@ -83,9 +101,9 @@ pub unsafe fn apply_median_blur_3x3_neon(
         }
     }
 
-    // 2. Process interior rows
-    let step_bytes = if channels == 3 { 3 } else { 1 };
-    let row_len_bytes = width * channels;
+    // 2. Interior rows using fast column-cache (interleaved across all channels)
+    let step = channels;
+    let row_bytes = width * channels;
 
     for y in 1..(height - 1) {
         let prev_ptr = data.as_ptr().add((y - 1) * stride);
@@ -93,56 +111,63 @@ pub unsafe fn apply_median_blur_3x3_neon(
         let next_ptr = data.as_ptr().add((y + 1) * stride);
         let out_ptr = output.as_mut_ptr().add(y * stride);
 
-        // Process left border pixel (x=0)
-        let row_curr = y * stride;
-        let row_prev = (y - 1) * stride;
-        let row_next = (y + 1) * stride;
+        // Left border pixel (x=0)
         for c in 0..channels {
-            let p = [
-                data[row_prev + c],
-                data[row_prev + c],
-                data[row_prev + channels + c],
-                data[row_curr + c],
-                data[row_curr + c],
-                data[row_curr + channels + c],
-                data[row_next + c],
-                data[row_next + c],
-                data[row_next + channels + c],
+            let p_left = [
+                *prev_ptr.add(c), *prev_ptr.add(c), *prev_ptr.add(step + c),
+                *curr_ptr.add(c), *curr_ptr.add(c), *curr_ptr.add(step + c),
+                *next_ptr.add(c), *next_ptr.add(c), *next_ptr.add(step + c),
             ];
-            output[row_curr + c] = median9(p);
+            *out_ptr.add(c) = median9(p_left);
         }
 
-        // SIMD interior with 2-way unrolling
-        let mut byte_idx = step_bytes;
-        let simd_end = row_len_bytes.saturating_sub(16 + step_bytes);
+        let mut byte_idx = step;
+        let simd_end = row_bytes.saturating_sub(16 + step);
 
         while byte_idx + 32 <= simd_end + 16 {
-            let p0_a = vld1q_u8(prev_ptr.add(byte_idx - step_bytes));
-            let p1_a = vld1q_u8(prev_ptr.add(byte_idx));
-            let p2_a = vld1q_u8(prev_ptr.add(byte_idx + step_bytes));
+            let p00_a = vld1q_u8(prev_ptr.add(byte_idx - step));
+            let p01_a = vld1q_u8(prev_ptr.add(byte_idx));
+            let p02_a = vld1q_u8(prev_ptr.add(byte_idx + step));
 
-            let p3_a = vld1q_u8(curr_ptr.add(byte_idx - step_bytes));
-            let p4_a = vld1q_u8(curr_ptr.add(byte_idx));
-            let p5_a = vld1q_u8(curr_ptr.add(byte_idx + step_bytes));
+            let p10_a = vld1q_u8(curr_ptr.add(byte_idx - step));
+            let p11_a = vld1q_u8(curr_ptr.add(byte_idx));
+            let p12_a = vld1q_u8(curr_ptr.add(byte_idx + step));
 
-            let p6_a = vld1q_u8(next_ptr.add(byte_idx - step_bytes));
-            let p7_a = vld1q_u8(next_ptr.add(byte_idx));
-            let p8_a = vld1q_u8(next_ptr.add(byte_idx + step_bytes));
+            let p20_a = vld1q_u8(next_ptr.add(byte_idx - step));
+            let p21_a = vld1q_u8(next_ptr.add(byte_idx));
+            let p22_a = vld1q_u8(next_ptr.add(byte_idx + step));
 
-            let p0_b = vld1q_u8(prev_ptr.add(byte_idx + 16 - step_bytes));
-            let p1_b = vld1q_u8(prev_ptr.add(byte_idx + 16));
-            let p2_b = vld1q_u8(prev_ptr.add(byte_idx + 16 + step_bytes));
+            let (c0_min_a, c0_mid_a, c0_max_a) = sort3(p00_a, p10_a, p20_a);
+            let (c1_min_a, c1_mid_a, c1_max_a) = sort3(p01_a, p11_a, p21_a);
+            let (c2_min_a, c2_mid_a, c2_max_a) = sort3(p02_a, p12_a, p22_a);
 
-            let p3_b = vld1q_u8(curr_ptr.add(byte_idx + 16 - step_bytes));
-            let p4_b = vld1q_u8(curr_ptr.add(byte_idx + 16));
-            let p5_b = vld1q_u8(curr_ptr.add(byte_idx + 16 + step_bytes));
+            let res_a = median_of_3_sorted_columns(
+                c0_min_a, c0_mid_a, c0_max_a,
+                c1_min_a, c1_mid_a, c1_max_a,
+                c2_min_a, c2_mid_a, c2_max_a,
+            );
 
-            let p6_b = vld1q_u8(next_ptr.add(byte_idx + 16 - step_bytes));
-            let p7_b = vld1q_u8(next_ptr.add(byte_idx + 16));
-            let p8_b = vld1q_u8(next_ptr.add(byte_idx + 16 + step_bytes));
+            let p00_b = vld1q_u8(prev_ptr.add(byte_idx + 16 - step));
+            let p01_b = vld1q_u8(prev_ptr.add(byte_idx + 16));
+            let p02_b = vld1q_u8(prev_ptr.add(byte_idx + 16 + step));
 
-            let res_a = vmedian9(p0_a, p1_a, p2_a, p3_a, p4_a, p5_a, p6_a, p7_a, p8_a);
-            let res_b = vmedian9(p0_b, p1_b, p2_b, p3_b, p4_b, p5_b, p6_b, p7_b, p8_b);
+            let p10_b = vld1q_u8(curr_ptr.add(byte_idx + 16 - step));
+            let p11_b = vld1q_u8(curr_ptr.add(byte_idx + 16));
+            let p12_b = vld1q_u8(curr_ptr.add(byte_idx + 16 + step));
+
+            let p20_b = vld1q_u8(next_ptr.add(byte_idx + 16 - step));
+            let p21_b = vld1q_u8(next_ptr.add(byte_idx + 16));
+            let p22_b = vld1q_u8(next_ptr.add(byte_idx + 16 + step));
+
+            let (c0_min_b, c0_mid_b, c0_max_b) = sort3(p00_b, p10_b, p20_b);
+            let (c1_min_b, c1_mid_b, c1_max_b) = sort3(p01_b, p11_b, p21_b);
+            let (c2_min_b, c2_mid_b, c2_max_b) = sort3(p02_b, p12_b, p22_b);
+
+            let res_b = median_of_3_sorted_columns(
+                c0_min_b, c0_mid_b, c0_max_b,
+                c1_min_b, c1_mid_b, c1_max_b,
+                c2_min_b, c2_mid_b, c2_max_b,
+            );
 
             vst1q_u8(out_ptr.add(byte_idx), res_a);
             vst1q_u8(out_ptr.add(byte_idx + 16), res_b);
@@ -151,42 +176,49 @@ pub unsafe fn apply_median_blur_3x3_neon(
         }
 
         while byte_idx <= simd_end {
-            let p0 = vld1q_u8(prev_ptr.add(byte_idx - step_bytes));
-            let p1 = vld1q_u8(prev_ptr.add(byte_idx));
-            let p2 = vld1q_u8(prev_ptr.add(byte_idx + step_bytes));
+            let p00 = vld1q_u8(prev_ptr.add(byte_idx - step));
+            let p01 = vld1q_u8(prev_ptr.add(byte_idx));
+            let p02 = vld1q_u8(prev_ptr.add(byte_idx + step));
 
-            let p3 = vld1q_u8(curr_ptr.add(byte_idx - step_bytes));
-            let p4 = vld1q_u8(curr_ptr.add(byte_idx));
-            let p5 = vld1q_u8(curr_ptr.add(byte_idx + step_bytes));
+            let p10 = vld1q_u8(curr_ptr.add(byte_idx - step));
+            let p11 = vld1q_u8(curr_ptr.add(byte_idx));
+            let p12 = vld1q_u8(curr_ptr.add(byte_idx + step));
 
-            let p6 = vld1q_u8(next_ptr.add(byte_idx - step_bytes));
-            let p7 = vld1q_u8(next_ptr.add(byte_idx));
-            let p8 = vld1q_u8(next_ptr.add(byte_idx + step_bytes));
+            let p20 = vld1q_u8(next_ptr.add(byte_idx - step));
+            let p21 = vld1q_u8(next_ptr.add(byte_idx));
+            let p22 = vld1q_u8(next_ptr.add(byte_idx + step));
 
-            let res = vmedian9(p0, p1, p2, p3, p4, p5, p6, p7, p8);
+            let (c0_min, c0_mid, c0_max) = sort3(p00, p10, p20);
+            let (c1_min, c1_mid, c1_max) = sort3(p01, p11, p21);
+            let (c2_min, c2_mid, c2_max) = sort3(p02, p12, p22);
+
+            let res = median_of_3_sorted_columns(
+                c0_min, c0_mid, c0_max,
+                c1_min, c1_mid, c1_max,
+                c2_min, c2_mid, c2_max,
+            );
             vst1q_u8(out_ptr.add(byte_idx), res);
-
             byte_idx += 16;
         }
 
-        // Remainder pixels in the row
+        // Right remainder pixels in the row
         let x_start = byte_idx / channels;
         for x in x_start..width {
             let x_prev = x.saturating_sub(1);
             let x_next = (x + 1).min(width - 1);
             for c in 0..channels {
                 let p = [
-                    data[row_prev + x_prev * channels + c],
-                    data[row_prev + x * channels + c],
-                    data[row_prev + x_next * channels + c],
-                    data[row_curr + x_prev * channels + c],
-                    data[row_curr + x * channels + c],
-                    data[row_curr + x_next * channels + c],
-                    data[row_next + x_prev * channels + c],
-                    data[row_next + x * channels + c],
-                    data[row_next + x_next * channels + c],
+                    *prev_ptr.add(x_prev * channels + c),
+                    *prev_ptr.add(x * channels + c),
+                    *prev_ptr.add(x_next * channels + c),
+                    *curr_ptr.add(x_prev * channels + c),
+                    *curr_ptr.add(x * channels + c),
+                    *curr_ptr.add(x_next * channels + c),
+                    *next_ptr.add(x_prev * channels + c),
+                    *next_ptr.add(x * channels + c),
+                    *next_ptr.add(x_next * channels + c),
                 ];
-                output[row_curr + x * channels + c] = median9(p);
+                *out_ptr.add(x * channels + c) = median9(p);
             }
         }
     }
