@@ -315,3 +315,188 @@ impl PyEdgeMethod {
         self.__repr__()
     }
 }
+
+// =============================================================================
+// Flexible Enum Parsers (accept PyClass, string, or int)
+// =============================================================================
+
+/// Parse RotateAngle from PyRotateAngle, int, or string
+pub fn parse_rotate_angle(val: &PyAny) -> PyResult<RotateAngle> {
+    if let Ok(obj) = val.extract::<PyRef<PyRotateAngle>>() {
+        return Ok(obj.inner);
+    }
+    if let Ok(num) = val.extract::<i32>() {
+        match num {
+            90 => return Ok(RotateAngle::Rotate90),
+            180 => return Ok(RotateAngle::Rotate180),
+            270 => return Ok(RotateAngle::Rotate270),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Rotate angle must be 90, 180, or 270 degrees, got {}",
+                    num
+                )))
+            }
+        }
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase();
+        match clean.as_str() {
+            "90" | "rotate90" | "rotate_90" => return Ok(RotateAngle::Rotate90),
+            "180" | "rotate180" | "rotate_180" => return Ok(RotateAngle::Rotate180),
+            "270" | "rotate270" | "rotate_270" => return Ok(RotateAngle::Rotate270),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown rotate angle '{}'. Expected: 90, 180, 270",
+                    s
+                )))
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected RotateAngle, int (90, 180, 270), or str ('90', '180', '270'), got {}",
+        val.get_type().name()?
+    )))
+}
+
+/// Parse Interpolation from PyInterpolation or string
+pub fn parse_interpolation(val: &PyAny) -> PyResult<Interpolation> {
+    if let Ok(obj) = val.extract::<PyRef<PyInterpolation>>() {
+        return Ok(obj.inner);
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase();
+        match clean.as_str() {
+            "nearest" => return Ok(Interpolation::Nearest),
+            "bilinear" | "linear" => return Ok(Interpolation::Bilinear),
+            "bicubic" | "cubic" => return Ok(Interpolation::Bicubic),
+            "lanczos4" | "lanczos" => return Ok(Interpolation::Lanczos4),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown interpolation mode '{}'. Expected: 'nearest', 'bilinear', 'bicubic', 'lanczos4'",
+                    s
+                )))
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected Interpolation or str ('nearest', 'bilinear', 'bicubic', 'lanczos4'), got {}",
+        val.get_type().name()?
+    )))
+}
+
+/// Parse PadMode from PyPadMode, string, or (string, value)
+pub fn parse_pad_mode(val: &PyAny) -> PyResult<PadMode> {
+    if let Ok(obj) = val.extract::<PyRef<PyPadMode>>() {
+        return Ok(obj.inner);
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase();
+        match clean.as_str() {
+            "reflect" => return Ok(PadMode::Reflect),
+            "replicate" | "edge" => return Ok(PadMode::Replicate),
+            "wrap" => return Ok(PadMode::Wrap),
+            "constant" => return Ok(PadMode::Constant { value: 0 }),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown pad mode '{}'. Expected: 'reflect', 'replicate', 'wrap', 'constant'",
+                    s
+                )))
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected PadMode or str ('reflect', 'replicate', 'wrap', 'constant'), got {}",
+        val.get_type().name()?
+    )))
+}
+
+/// Parse EmbossDirection from PyEmbossDirection or string
+pub fn parse_emboss_direction(val: &PyAny) -> PyResult<EmbossDirection> {
+    if let Ok(obj) = val.extract::<PyRef<PyEmbossDirection>>() {
+        return Ok(obj.inner);
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase().replace('-', "_");
+        match clean.as_str() {
+            "top_left" | "topleft" => return Ok(EmbossDirection::TopLeft),
+            "top" => return Ok(EmbossDirection::Top),
+            "top_right" | "topright" => return Ok(EmbossDirection::TopRight),
+            "right" => return Ok(EmbossDirection::Right),
+            "bottom_right" | "bottomright" => return Ok(EmbossDirection::BottomRight),
+            "bottom" => return Ok(EmbossDirection::Bottom),
+            "bottom_left" | "bottomleft" => return Ok(EmbossDirection::BottomLeft),
+            "left" => return Ok(EmbossDirection::Left),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown emboss direction '{}'",
+                    s
+                )))
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected EmbossDirection or str, got {}",
+        val.get_type().name()?
+    )))
+}
+
+/// Parse EdgeMethod from PyEdgeMethod or string
+pub fn parse_edge_method(val: &PyAny) -> PyResult<EdgeMethod> {
+    if let Ok(obj) = val.extract::<PyRef<PyEdgeMethod>>() {
+        return Ok(obj.inner);
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase();
+        match clean.as_str() {
+            "sobel" => return Ok(EdgeMethod::Sobel),
+            "prewitt" => return Ok(EdgeMethod::Prewitt),
+            "laplacian" => return Ok(EdgeMethod::Laplacian),
+            "canny" => return Ok(EdgeMethod::Canny),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown edge method '{}'. Expected: 'sobel', 'prewitt', 'laplacian', 'canny'",
+                    s
+                )))
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected EdgeMethod or str ('sobel', 'prewitt', 'laplacian', 'canny'), got {}",
+        val.get_type().name()?
+    )))
+}
+
+/// Parse BorderMode from PyPadMode, string, or int
+pub fn parse_border_mode(val: &PyAny) -> PyResult<crate::sampled_ir::ops::BorderMode> {
+    use crate::sampled_ir::ops::BorderMode;
+    if let Ok(obj) = val.extract::<PyRef<PyPadMode>>() {
+        return Ok(match obj.inner {
+            PadMode::Constant { value } => BorderMode::Constant { value },
+            PadMode::Reflect => BorderMode::Reflect,
+            PadMode::Replicate => BorderMode::Replicate,
+            PadMode::Wrap => BorderMode::Wrap,
+        });
+    }
+    if let Ok(s) = val.extract::<&str>() {
+        let clean = s.trim().to_lowercase();
+        match clean.as_str() {
+            "reflect" => return Ok(BorderMode::Reflect),
+            "replicate" | "nearest" => return Ok(BorderMode::Replicate),
+            "wrap" => return Ok(BorderMode::Wrap),
+            "constant" => return Ok(BorderMode::Constant { value: 0 }),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown border mode '{}'. Expected: 'reflect', 'replicate', 'wrap', 'constant'",
+                    s
+                )))
+            }
+        }
+    }
+    if let Ok(v) = val.extract::<u8>() {
+        return Ok(BorderMode::Constant { value: v });
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected BorderMode or str ('reflect', 'replicate', 'wrap', 'constant'), got {}",
+        val.get_type().name()?
+    )))
+}

@@ -133,3 +133,71 @@ fn test_pad_asymmetric() {
     assert_eq!(padded.width, 8);
     assert_eq!(padded.height, 4);
 }
+
+/// Bit-exactness of the routed pad-reflect path (NEON gray on aarch64, scalar
+/// fallback elsewhere) vs the scalar reference `pad_reflect_scalar`.
+/// Covers borders smaller than, equal to, and larger than the source axis.
+fn assert_reflect_matches_scalar(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+) {
+    let new_w = w + left + right;
+    let new_h = h + top + bottom;
+
+    // Scalar reference (pad_fast_slice with Reflect)
+    let mut expected = vec![0u8; new_w * new_h];
+    super::pad_reflect_scalar(&mut expected, src, new_w, w, h, top, left, 1);
+
+    // Routed path
+    let mut data = src.to_vec();
+    let mut img = FusableImage::new(&mut data, w, h, 1);
+    let result =
+        Pad::new(top as u32, bottom as u32, left as u32, right as u32, PadMode::Reflect)
+            .execute(&mut img);
+    let padded = result.expect("pad should return a barrier image");
+    assert_eq!(padded.width as usize, new_w);
+    assert_eq!(padded.height as usize, new_h);
+    assert_eq!(padded.data, expected, "bit-exact vs scalar reflect");
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_small() {
+    let src: Vec<u8> = (0..(5 * 6)).map(|i| (i * 7 % 251) as u8).collect();
+    assert_reflect_matches_scalar(&src, 5, 6, 2, 3, 2, 3);
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_border_equals_dimension() {
+    let src: Vec<u8> = (0..(5 * 5)).map(|i| (i * 13 % 255) as u8).collect();
+    assert_reflect_matches_scalar(&src, 5, 5, 5, 5, 5, 5);
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_border_exceeds_dimension() {
+    // Borders larger than the axis on both width and height.
+    let src: Vec<u8> = (0..(3 * 4)).map(|i| (i * 31 % 250) as u8).collect();
+    assert_reflect_matches_scalar(&src, 3, 4, 7, 9, 5, 8);
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_1x1_huge_border() {
+    let src = vec![200u8];
+    assert_reflect_matches_scalar(&src, 1, 1, 20, 20, 20, 20);
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_no_horizontal_padding() {
+    let src: Vec<u8> = (0..(8 * 3)).map(|i| (i * 3 % 254) as u8).collect();
+    assert_reflect_matches_scalar(&src, 8, 3, 4, 2, 0, 0);
+}
+
+#[test]
+fn test_pad_reflect_bit_exact_only_horizontal() {
+    let src: Vec<u8> = (0..(4 * 4)).map(|i| (i * 17 % 253) as u8).collect();
+    assert_reflect_matches_scalar(&src, 4, 4, 0, 0, 6, 6);
+}

@@ -20,3 +20,11 @@ opencv-static/
 # Rust build metadata
 *.rmeta
 libbuild.rmeta
+
+# Worktrees
+.worktrees/
+worktrees/
+
+
+# Build artifacts (CI builds and uploads wheels)
+dist/

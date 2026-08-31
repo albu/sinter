@@ -131,16 +131,19 @@ impl Dist {
 
     /// Sample this distribution as an i32
     ///
-    /// # Panics
-    /// - If called on non-integer distributions
+    /// Float distributions are rounded to the nearest integer, so an i32-typed
+    /// field (e.g. HSV hue_shift) accepts `Uniform(-10, 10)` or `(-10, 10)`
+    /// tuples exactly like its f32 siblings do.
     pub fn sample_i32(&self, rng: &mut dyn Rng) -> i32 {
         match self {
             Dist::Constant(v) => *v as i32,
             Dist::UniformInt { min, max } => {
                 UniformInt::new(*min, *max).sample(rng)
             }
-            _ => {
-                panic!("Cannot sample this distribution as i32");
+            Dist::Uniform { min, max } => Uniform::new(*min, *max).sample(rng).round() as i32,
+            Dist::Normal { .. } => self.sample_f32(rng).round() as i32,
+            Dist::Bernoulli { p } => {
+                if Bernoulli::new(*p).sample(rng) { 1 } else { 0 }
             }
         }
     }

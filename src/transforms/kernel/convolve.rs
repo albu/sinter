@@ -16,45 +16,7 @@ use crate::core::FusableImage;
 /// * `scale` - Divisor for the kernel sum (to avoid float operations)
 /// * `offset` - Value to add after convolution (typically 0)
 pub fn convolve_3x3(image: &mut FusableImage, kernel: &[i32; 9], scale: i32, offset: i32) {
-    let width = image.width;
-    let height = image.height;
-    let channels = image.channels;
-    let data = &mut image.data;
-
-    // Create output buffer
-    let mut output = vec![0u8; data.len()];
-
-    // Helper to get pixel value with edge extension
-    let get_pixel = |data: &[u8], x: i32, y: i32, c: usize| -> u8 {
-        let x_clamped = x.max(0).min(width as i32 - 1) as usize;
-        let y_clamped = y.max(0).min(height as i32 - 1) as usize;
-        data[(y_clamped * width as usize + x_clamped) * channels + c]
-    };
-
-    for y in 0..height {
-        for x in 0..width {
-            for c in 0..channels {
-                let mut sum: i32 = 0;
-
-                // Apply 3x3 kernel
-                for ky in 0..3 {
-                    for kx in 0..3 {
-                        let px = x as i32 + kx as i32 - 1;
-                        let py = y as i32 + ky as i32 - 1;
-                        let pixel = get_pixel(data, px, py, c) as i32;
-                        sum += pixel * kernel[ky * 3 + kx];
-                    }
-                }
-
-                // Apply scale and offset
-                let value = (sum / scale).saturating_add(offset);
-                output[(y * width + x) * channels + c] = value.clamp(0, 255) as u8;
-            }
-        }
-    }
-
-    // Copy output back to image
-    data.copy_from_slice(&output);
+    super::convolve_2d::convolve_3x3_fast(image, kernel, scale, offset);
 }
 
 /// Apply a 5x5 convolution kernel to an image
@@ -265,15 +227,14 @@ pub fn convolve_separable(image: &mut FusableImage, kernel: &[i32], scale: i32) 
     // the vertical pass doesn't read from partially-written data.
     // The SIMD implementations handle this correctly by using separate buffers.
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         // Use SIMD-optimized version when available
         use super::convolve_simd;
-        convolve_simd::convolve_1d_horizontal_detect(image, kernel, scale);
-        convolve_simd::convolve_1d_vertical_detect(image, kernel, scale);
+        convolve_simd::convolve_separable_detect(image, kernel, scale);
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(target_arch = "aarch64"))]
     {
         // Scalar fallback for other architectures
         convolve_1d_horizontal(image, kernel, scale);

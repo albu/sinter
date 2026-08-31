@@ -299,6 +299,23 @@ impl ExecPlan {
         self.stats.as_ref()
     }
 
+    /// Does this execution plan mutate its initial input buffer?
+    ///
+    /// Returns true if the FIRST execution node modifies the input buffer in-place.
+    /// Returns false if the first node produces a new BarrierImage (e.g. Resize, Pad, Crop, Affine),
+    /// which means subsequent transforms only mutate the new BarrierImage, leaving the caller's
+    /// input buffer 100% untouched.
+    pub fn mutates_input(&self) -> bool {
+        if let Some(first_node) = self.nodes.first() {
+            match &first_node.kind {
+                ExecNodeKind::Barrier(_) => false,
+                ExecNodeKind::Fused(ops) => !ops.is_empty(),
+            }
+        } else {
+            false
+        }
+    }
+
     /// Print the fusion statistics (if available)
     pub fn print_stats(&self) {
         if let Some(stats) = &self.stats {

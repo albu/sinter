@@ -45,13 +45,19 @@ impl HorizontalFlip {
         let row_stride = w * c;
         let data_ptr = image.data.as_mut_ptr();
 
-        // Use SIMD-optimized path for grayscale
-        if c == 1 {
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
+        // Use SIMD-optimized path for grayscale and RGB
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            if c == 1 {
                 for y in 0..h {
                     let row_start = y * row_stride;
                     neon::horizontal_flip_gray_neon(data_ptr.add(row_start), w);
+                }
+                return;
+            } else if c == 3 {
+                for y in 0..h {
+                    let row_start = y * row_stride;
+                    neon::horizontal_flip_rgb_neon(data_ptr.add(row_start), w);
                 }
                 return;
             }

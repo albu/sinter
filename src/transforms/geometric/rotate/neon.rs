@@ -65,6 +65,54 @@ pub(crate) unsafe fn transpose_8x8_u8_neon(rows: &mut [uint8x8_t; 8]) {
 }
 
 #[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(crate) unsafe fn transpose_16x16_u8_neon(r: &mut [uint8x16_t; 16]) {
+    let (t0, t1) = (vtrn1q_u8(r[0], r[1]), vtrn2q_u8(r[0], r[1]));
+    let (t2, t3) = (vtrn1q_u8(r[2], r[3]), vtrn2q_u8(r[2], r[3]));
+    let (t4, t5) = (vtrn1q_u8(r[4], r[5]), vtrn2q_u8(r[4], r[5]));
+    let (t6, t7) = (vtrn1q_u8(r[6], r[7]), vtrn2q_u8(r[6], r[7]));
+    let (t8, t9) = (vtrn1q_u8(r[8], r[9]), vtrn2q_u8(r[8], r[9]));
+    let (t10, t11) = (vtrn1q_u8(r[10], r[11]), vtrn2q_u8(r[10], r[11]));
+    let (t12, t13) = (vtrn1q_u8(r[12], r[13]), vtrn2q_u8(r[12], r[13]));
+    let (t14, t15) = (vtrn1q_u8(r[14], r[15]), vtrn2q_u8(r[14], r[15]));
+
+    let (s0, s2) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t0), vreinterpretq_u16_u8(t2))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t0), vreinterpretq_u16_u8(t2))));
+    let (s1, s3) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t1), vreinterpretq_u16_u8(t3))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t1), vreinterpretq_u16_u8(t3))));
+    let (s4, s6) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t4), vreinterpretq_u16_u8(t6))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t4), vreinterpretq_u16_u8(t6))));
+    let (s5, s7) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t5), vreinterpretq_u16_u8(t7))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t5), vreinterpretq_u16_u8(t7))));
+    let (s8, s10) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t8), vreinterpretq_u16_u8(t10))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t8), vreinterpretq_u16_u8(t10))));
+    let (s9, s11) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t9), vreinterpretq_u16_u8(t11))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t9), vreinterpretq_u16_u8(t11))));
+    let (s12, s14) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t12), vreinterpretq_u16_u8(t14))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t12), vreinterpretq_u16_u8(t14))));
+    let (s13, s15) = (vreinterpretq_u8_u16(vtrn1q_u16(vreinterpretq_u16_u8(t13), vreinterpretq_u16_u8(t15))), vreinterpretq_u8_u16(vtrn2q_u16(vreinterpretq_u16_u8(t13), vreinterpretq_u16_u8(t15))));
+
+    let (u0, u4) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s0), vreinterpretq_u32_u8(s4))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s0), vreinterpretq_u32_u8(s4))));
+    let (u1, u5) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s1), vreinterpretq_u32_u8(s5))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s1), vreinterpretq_u32_u8(s5))));
+    let (u2, u6) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s2), vreinterpretq_u32_u8(s6))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s2), vreinterpretq_u32_u8(s6))));
+    let (u3, u7) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s3), vreinterpretq_u32_u8(s7))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s3), vreinterpretq_u32_u8(s7))));
+    let (u8, u12) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s8), vreinterpretq_u32_u8(s12))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s8), vreinterpretq_u32_u8(s12))));
+    let (u9, u13) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s9), vreinterpretq_u32_u8(s13))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s9), vreinterpretq_u32_u8(s13))));
+    let (u10, u14) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s10), vreinterpretq_u32_u8(s14))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s10), vreinterpretq_u32_u8(s14))));
+    let (u11, u15) = (vreinterpretq_u8_u32(vtrn1q_u32(vreinterpretq_u32_u8(s11), vreinterpretq_u32_u8(s15))), vreinterpretq_u8_u32(vtrn2q_u32(vreinterpretq_u32_u8(s11), vreinterpretq_u32_u8(s15))));
+
+    r[0] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u0), vreinterpretq_u64_u8(u8)));
+    r[8] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u0), vreinterpretq_u64_u8(u8)));
+    r[1] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u1), vreinterpretq_u64_u8(u9)));
+    r[9] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u1), vreinterpretq_u64_u8(u9)));
+    r[2] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u2), vreinterpretq_u64_u8(u10)));
+    r[10] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u2), vreinterpretq_u64_u8(u10)));
+    r[3] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u3), vreinterpretq_u64_u8(u11)));
+    r[11] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u3), vreinterpretq_u64_u8(u11)));
+    r[4] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u4), vreinterpretq_u64_u8(u12)));
+    r[12] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u4), vreinterpretq_u64_u8(u12)));
+    r[5] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u5), vreinterpretq_u64_u8(u13)));
+    r[13] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u5), vreinterpretq_u64_u8(u13)));
+    r[6] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u6), vreinterpretq_u64_u8(u14)));
+    r[14] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u6), vreinterpretq_u64_u8(u14)));
+    r[7] = vreinterpretq_u8_u64(vtrn1q_u64(vreinterpretq_u64_u8(u7), vreinterpretq_u64_u8(u15)));
+    r[15] = vreinterpretq_u8_u64(vtrn2q_u64(vreinterpretq_u64_u8(u7), vreinterpretq_u64_u8(u15)));
+}
+
+#[cfg(target_arch = "aarch64")]
 /// Rotate 90° clockwise using tiled NEON SIMD
 ///
 /// For RGB images, uses the optimal pipeline:
@@ -209,15 +257,6 @@ unsafe fn rotate_90_rgb_8x8_tile(
 }
 
 #[cfg(target_arch = "aarch64")]
-/// Grayscale 90° rotation using 8x8 tiles with NEON SIMD
-///
-/// Pipeline:
-/// 1. Load 8x8 tile rows directly
-/// 2. Transpose the 8x8 block
-/// 3. Store each row reversed (for 90° CW rotation)
-///
-/// For rotate90: src(x,y) -> dst(y, height-1-x)
-/// After transpose: each row becomes a column, then we reverse the column
 unsafe fn rotate_90_gray_tiled(
     src: &[u8],
     dst: &mut [u8],
@@ -226,16 +265,13 @@ unsafe fn rotate_90_gray_tiled(
     src_stride: usize,
     dst_stride: usize,
 ) {
-    const TILE_SIZE: usize = 8;
+    const TILE_SIZE: usize = 16;
 
-    // Process 8x8 tiles
     for y_tile in (0..height).step_by(TILE_SIZE) {
         for x_tile in (0..width).step_by(TILE_SIZE) {
-            // Only process full 8x8 tiles with SIMD
             if y_tile + TILE_SIZE <= height && x_tile + TILE_SIZE <= width {
-                rotate_90_gray_8x8_tile(src, dst, x_tile, y_tile, src_stride, dst_stride, height);
+                rotate_90_gray_16x16_tile(src, dst, x_tile, y_tile, src_stride, dst_stride, height);
             } else {
-                // Fallback for partial tiles at borders
                 let y_max = (y_tile + TILE_SIZE).min(height);
                 let x_max = (x_tile + TILE_SIZE).min(width);
                 for y in y_tile..y_max {
@@ -254,14 +290,8 @@ unsafe fn rotate_90_gray_tiled(
 }
 
 #[cfg(target_arch = "aarch64")]
-/// Process a single 8x8 grayscale tile for 90° CW rotation
-///
-/// Strategy:
-/// 1. Load 8 rows directly (no deinterleaving needed)
-/// 2. Transpose the 8x8 block (SIMD)
-/// 3. Store each row reversed (for 90° CW rotation)
 #[inline(always)]
-unsafe fn rotate_90_gray_8x8_tile(
+unsafe fn rotate_90_gray_16x16_tile(
     src: &[u8],
     dst: &mut [u8],
     x_tile: usize,
@@ -270,33 +300,37 @@ unsafe fn rotate_90_gray_8x8_tile(
     dst_stride: usize,
     height: usize,
 ) {
-    // Step 1: Load 8 rows (8 pixels each)
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
     let mut rows = [
-        vld1_u8(src.as_ptr().add((y_tile + 0) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 1) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 2) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 3) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 4) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 5) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 6) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 7) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 0) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 1) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 2) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 3) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 4) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 5) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 6) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 7) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 8) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 9) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 10) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 11) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 12) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 13) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 14) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 15) * src_stride + x_tile)),
     ];
 
-    // Step 2: Transpose the 8x8 block (SIMD)
-    transpose_8x8_u8_neon(&mut rows);
+    transpose_16x16_u8_neon(&mut rows);
 
-    // Step 3: Store each row reversed (for 90° CW rotation)
-    // For rotate90: dst(y, H-1-x)
-    // After transpose, each row goes to a different y position, and we reverse horizontally
-    let dst_x_start = height - 1 - y_tile - 7;
+    let dst_x_start = height - 1 - y_tile - 15;
 
-    for row in 0..8 {
+    for row in 0..16 {
         let dst_y = x_tile + row;
-        let dst_x = dst_x_start;
-
-        // Reverse the row using 64-bit reversal
-        let reversed = vrev64_u8(rows[row]);
-        vst1_u8(dst.as_mut_ptr().add(dst_y * dst_stride + dst_x), reversed);
+        let rev64 = vrev64q_u8(rows[row]);
+        let rev = vcombine_u8(vget_high_u8(rev64), vget_low_u8(rev64));
+        vst1q_u8(dst_ptr.add(dst_y * dst_stride + dst_x_start), rev);
     }
 }
 
@@ -467,6 +501,7 @@ unsafe fn rotate_270_rgb_8x8_tile(
 ///
 /// For rotate270: src(x,y) -> dst(y, width-1-x)
 /// After transpose: rows become columns
+#[cfg(target_arch = "aarch64")]
 unsafe fn rotate_270_gray_tiled(
     src: &[u8],
     dst: &mut [u8],
@@ -475,19 +510,15 @@ unsafe fn rotate_270_gray_tiled(
     src_stride: usize,
     dst_stride: usize,
 ) {
-    const TILE_SIZE: usize = 8;
+    const TILE_SIZE: usize = 16;
 
-    // Process 8x8 tiles
     for y_tile in (0..height).step_by(TILE_SIZE) {
         for x_tile in (0..width).step_by(TILE_SIZE) {
-            let y_max = (y_tile + TILE_SIZE).min(height);
-            let x_max = (x_tile + TILE_SIZE).min(width);
-
-            // Process full 8x8 tiles with SIMD
             if y_tile + TILE_SIZE <= height && x_tile + TILE_SIZE <= width {
-                rotate_270_gray_8x8_tile(src, dst, x_tile, y_tile, src_stride, dst_stride, width);
+                rotate_270_gray_16x16_tile(src, dst, x_tile, y_tile, src_stride, dst_stride, width);
             } else {
-                // Fallback for borders
+                let y_max = (y_tile + TILE_SIZE).min(height);
+                let x_max = (x_tile + TILE_SIZE).min(width);
                 for y in y_tile..y_max {
                     for x in x_tile..x_max {
                         let src_idx = y * src_stride + x;
@@ -504,14 +535,8 @@ unsafe fn rotate_270_gray_tiled(
 }
 
 #[cfg(target_arch = "aarch64")]
-/// Process a single 8x8 grayscale tile for 270° CW rotation
-///
-/// Strategy:
-/// 1. Load 8 rows directly (no deinterleaving needed)
-/// 2. Transpose the 8x8 block (SIMD)
-/// 3. Store each transposed row as a column
 #[inline(always)]
-unsafe fn rotate_270_gray_8x8_tile(
+unsafe fn rotate_270_gray_16x16_tile(
     src: &[u8],
     dst: &mut [u8],
     x_tile: usize,
@@ -520,29 +545,34 @@ unsafe fn rotate_270_gray_8x8_tile(
     dst_stride: usize,
     width: usize,
 ) {
-    // Step 1: Load 8 rows (8 pixels each)
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
     let mut rows = [
-        vld1_u8(src.as_ptr().add((y_tile + 0) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 1) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 2) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 3) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 4) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 5) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 6) * src_stride + x_tile)),
-        vld1_u8(src.as_ptr().add((y_tile + 7) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 0) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 1) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 2) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 3) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 4) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 5) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 6) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 7) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 8) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 9) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 10) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 11) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 12) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 13) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 14) * src_stride + x_tile)),
+        vld1q_u8(src_ptr.add((y_tile + 15) * src_stride + x_tile)),
     ];
 
-    // Step 2: Transpose the 8x8 block (SIMD)
-    transpose_8x8_u8_neon(&mut rows);
+    transpose_16x16_u8_neon(&mut rows);
 
-    // Step 3: Store each transposed row as a column
-    // For rotate270: dst_x = y, dst_y = W-1-x
-    // After transpose, rows[i] becomes column i in dst
-    for i in 0..8 {
-        let dst_x = y_tile;
-        let dst_y = width - 1 - x_tile - i;
-
-        vst1_u8(dst.as_mut_ptr().add(dst_y * dst_stride + dst_x), rows[i]);
+    let dst_x_start = y_tile;
+    for row in 0..16 {
+        let dst_y = width - 1 - (x_tile + row);
+        vst1q_u8(dst_ptr.add(dst_y * dst_stride + dst_x_start), rows[row]);
     }
 }
 

@@ -17,7 +17,7 @@ pub use affine::{Affine, AffineParams};
 pub use horizontal_flip::HorizontalFlip;
 pub use vertical_flip::VerticalFlip;
 pub use resize::Resize;
-pub use crop::Crop;
+pub use crop::{Crop, RandomCrop};
 pub use rotate::{Rotate, RotateAngle};
 pub use pad::{Pad, PadMode};
 pub use transpose::Transpose;

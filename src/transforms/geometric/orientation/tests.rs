@@ -122,8 +122,14 @@ fn test_structural_kernel_rot180() {
     let kernel = StructuralKernel::new(Orientation::Rot180);
     let result = kernel.execute(&mut img);
 
-    assert!(result.is_none());
-    assert_eq!(img.data, &[6, 5, 4, 3, 2, 1]);
+    // Rot180 delegates to Rotate::execute: out-of-place NEON reverse.
+    // The original buffer is left untouched; the result comes back as a BarrierImage.
+    assert!(result.is_some());
+    assert_eq!(img.data, &[1, 2, 3, 4, 5, 6]);
+    let rotated = result.unwrap();
+    assert_eq!(rotated.width, 3);
+    assert_eq!(rotated.height, 2);
+    assert_eq!(rotated.data, &[6, 5, 4, 3, 2, 1]);
 }
 
 #[test]

@@ -15,23 +15,31 @@ pub fn apply_invert_neon(image: &mut FusableImage) {
     let len = data.len();
 
     unsafe {
-        let chunks = len / 16;
+        let chunks = len / 64;
+        let mut ptr = data.as_mut_ptr();
+        for _ in 0..chunks {
+            let v0 = vld1q_u8(ptr);
+            let v1 = vld1q_u8(ptr.add(16));
+            let v2 = vld1q_u8(ptr.add(32));
+            let v3 = vld1q_u8(ptr.add(48));
 
-        for i in 0..chunks {
-            let offset = i * 16;
+            vst1q_u8(ptr, vmvnq_u8(v0));
+            vst1q_u8(ptr.add(16), vmvnq_u8(v1));
+            vst1q_u8(ptr.add(32), vmvnq_u8(v2));
+            vst1q_u8(ptr.add(48), vmvnq_u8(v3));
 
-            // Load 16 pixels
-            let pixels = vld1q_u8(data.as_ptr().add(offset));
-
-            // Bitwise NOT = 255 - x for u8 (single instruction!)
-            let inverted = vmvnq_u8(pixels);
-
-            // Store result
-            vst1q_u8(data.as_mut_ptr().add(offset), inverted);
+            ptr = ptr.add(64);
         }
 
-        // Handle remaining pixels
-        for i in (chunks * 16)..len {
+        let rem_chunks = (len % 64) / 16;
+        for _ in 0..rem_chunks {
+            let v = vld1q_u8(ptr);
+            vst1q_u8(ptr, vmvnq_u8(v));
+            ptr = ptr.add(16);
+        }
+
+        let rem_start = chunks * 64 + rem_chunks * 16;
+        for i in rem_start..len {
             data[i] = 255 - data[i];
         }
     }

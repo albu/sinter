@@ -138,7 +138,11 @@ impl Executable for Crop {
         let x_offset = self.x as usize * channels;
         let y_start = self.y as usize;
 
-        let mut cropped_data = vec![0u8; cropped_width * cropped_height * channels];
+        let len = cropped_width * cropped_height * channels;
+        let mut cropped_data = Vec::<u8>::with_capacity(len);
+        unsafe {
+            cropped_data.set_len(len);
+        }
 
         // Use NEON SIMD for RGB and grayscale when crop width is sufficient
         if cropped_width >= 16 && (channels == 3 || channels == 1) {
@@ -223,6 +227,108 @@ impl Executable for Crop {
             cropped_height,
             channels,
         ))
+    }
+}
+
+// ============================================================================
+// RandomCrop: fixed-size window at a sampled position
+// ============================================================================
+
+/// RandomCrop transform
+///
+/// Crops a `width` x `height` window at a position carried as fractional
+/// anchors (`fx`, `fy` in `[0, 1)`). The anchors resolve against the ACTUAL
+/// image size at execution / label-mapping time:
+///
+/// ```text
+/// x = min(floor(fx * (img_w - width + 1)), img_w - width)
+/// ```
+///
+/// This keeps one sampled program valid for any image size while staying
+/// fully deterministic: same anchors + same size => same window, which is
+/// what makes image and bbox/keypoint transforms agree exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RandomCrop {
+    pub width: u32,
+    pub height: u32,
+    pub fx: f32,
+    pub fy: f32,
+}
+
+impl RandomCrop {
+    /// Create a new RandomCrop transform
+    ///
+    /// # Panics
+    /// Panics if width or height is zero.
+    pub fn new(width: u32, height: u32, fx: f32, fy: f32) -> Self {
+        assert!(width > 0, "width must be positive");
+        assert!(height > 0, "height must be positive");
+        Self {
+            width,
+            height,
+            fx,
+            fy,
+        }
+    }
+
+    /// Resolve the concrete top-left corner for a given image size
+    fn resolve(&self, img_w: u32, img_h: u32) -> (u32, u32) {
+        let slack_x = img_w.saturating_sub(self.width);
+        let slack_y = img_h.saturating_sub(self.height);
+        // Multiply by (slack + 1) so the rightmost/bottom-most position is
+        // reachable; clamp guards fx/fy outside [0, 1) (incl. NaN -> 0).
+        let x = ((self.fx * (slack_x + 1) as f32) as u32).min(slack_x);
+        let y = ((self.fy * (slack_y + 1) as f32) as u32).min(slack_y);
+        (x, y)
+    }
+
+    /// The concrete Crop this transform resolves to for a given image size
+    pub fn to_crop(&self, img_w: u32, img_h: u32) -> Crop {
+        let (x, y) = self.resolve(img_w, img_h);
+        Crop::new(x, y, self.width, self.height)
+    }
+}
+
+impl Transform for RandomCrop {
+    fn access(&self) -> AccessPattern {
+        AccessPattern::OutOfPlace
+    }
+
+    fn shape_effect(&self) -> ShapeEffect {
+        ShapeEffect::Crop
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_executable(&self) -> Option<&dyn Executable> {
+        Some(self)
+    }
+
+    fn as_label_transform(&self) -> Option<&dyn LabelTransform> {
+        Some(self)
+    }
+}
+
+impl LabelTransform for RandomCrop {
+    fn map_point(&self, point: (f32, f32), image_size: (u32, u32)) -> Option<(f32, f32)> {
+        self.to_crop(image_size.0, image_size.1)
+            .map_point(point, image_size)
+    }
+
+    fn map_bbox(&self, bbox: [f32; 4], image_size: (u32, u32)) -> Option<[f32; 4]> {
+        self.to_crop(image_size.0, image_size.1)
+            .map_bbox(bbox, image_size)
+    }
+}
+
+impl Executable for RandomCrop {
+    fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
+        // In-bounds by construction whenever width/height fit the image;
+        // the Python binding validates that case before execution.
+        self.to_crop(image.width as u32, image.height as u32)
+            .execute(image)
     }
 }
 
@@ -412,5 +518,77 @@ mod tests {
         assert_eq!(cropped.width, 1);
         assert_eq!(cropped.height, 3);
         assert_eq!(cropped.data, &[2, 3, 4]);
+    }
+
+    // ------------------------------------------------------------------
+    // RandomCrop
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_random_crop_anchor_resolution() {
+        // 10x8 image, 4x2 window -> slack (6, 6)
+        let rc = RandomCrop::new(4, 2, 0.0, 0.0);
+        assert_eq!(rc.to_crop(10, 8).x, 0);
+        assert_eq!(rc.to_crop(10, 8).y, 0);
+
+        // fx -> 1 must reach the rightmost/bottom-most window position
+        let rc = RandomCrop::new(4, 2, 0.999_999, 0.999_999);
+        assert_eq!(rc.to_crop(10, 8).x, 6);
+        assert_eq!(rc.to_crop(10, 8).y, 6);
+
+        // Window == image size resolves to (0, 0) for any anchor
+        let rc = RandomCrop::new(10, 8, 0.7, 0.3);
+        assert_eq!(rc.to_crop(10, 8).x, 0);
+        assert_eq!(rc.to_crop(10, 8).y, 0);
+
+        // Monotone in fx (no jumps past the slack)
+        let mut prev_x = 0;
+        for i in 0..20 {
+            let fx = i as f32 / 20.0;
+            let x = RandomCrop::new(4, 2, fx, 0.0).to_crop(10, 8).x;
+            assert!(x >= prev_x && x <= 6);
+            prev_x = x;
+        }
+    }
+
+    #[test]
+    fn test_random_crop_execute_matches_crop() {
+        // 4x4 gray, window 2x2: execution must equal the resolved Crop
+        let mut data = vec![0u8; 16];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let rc = RandomCrop::new(2, 2, 0.5, 0.5);
+        let expected = rc.to_crop(4, 4);
+
+        let mut img = FusableImage::new(&mut data, 4, 4, 1);
+        let out = rc.execute(&mut img).unwrap();
+        assert_eq!(out.width, 2);
+        assert_eq!(out.height, 2);
+
+        let mut data2 = vec![0u8; 16];
+        for (i, b) in data2.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let mut img2 = FusableImage::new(&mut data2, 4, 4, 1);
+        let out2 = expected.execute(&mut img2).unwrap();
+        assert_eq!(out.data, out2.data);
+    }
+
+    #[test]
+    fn test_random_crop_label_transform_agrees_with_resolved_crop() {
+        // bbox mapping through RandomCrop must be identical to mapping
+        // through the concrete Crop it resolves to (image/label agreement).
+        let rc = RandomCrop::new(4, 2, 0.6, 0.9);
+        let crop = rc.to_crop(10, 8);
+        let bbox = [3.0, 1.0, 4.0, 2.0];
+        assert_eq!(rc.map_bbox(bbox, (10, 8)), crop.map_bbox(bbox, (10, 8)));
+        assert_eq!(
+            rc.map_point((3.5, 1.5), (10, 8)),
+            crop.map_point((3.5, 1.5), (10, 8)),
+        );
+
+        // A box outside the window dies, same as Crop
+        assert_eq!(rc.map_bbox([100.0, 100.0, 2.0, 2.0], (10, 8)), None);
     }
 }

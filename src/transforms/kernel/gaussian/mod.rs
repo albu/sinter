@@ -11,8 +11,6 @@
 // - Automatic algorithm selection
 
 pub mod kernel;
-#[cfg(feature = "opencv")]
-mod opencv;
 
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
 
@@ -100,24 +98,8 @@ impl Transform for GaussianBlurSigma {
 
 impl Executable for GaussianBlurSigma {
     fn execute(&self, image: &mut FusableImage) -> Option<crate::core::BarrierImage> {
-        #[cfg(feature = "opencv")]
-        {
-            // Use OpenCV's optimized Gaussian blur
-            match opencv::execute_opencv(image, self.sigma, self.sigma) {
-                Ok(_) => return None,
-                Err(_) => {
-                    // Fall back to Rust implementation on error
-                    gaussian_dispatch(image, self.sigma, self.quality);
-                    return None;
-                }
-            }
-        }
-
-        #[cfg(not(feature = "opencv"))]
-        {
-            gaussian_dispatch(image, self.sigma, self.quality);
-            None
-        }
+        gaussian_dispatch(image, self.sigma, self.quality);
+        None
     }
 }
 
@@ -160,22 +142,24 @@ fn blur_specialized(image: &mut FusableImage, sigma: f32) {
 
     match tap_count {
         3 => {
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 2, 1][..], 4);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(image, &[1, 2, 1][..], 4);
             }
         }
         5 => {
             // Pascal row 4: [1, 4, 6, 4, 1] -> sum = 16
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 4, 6, 4, 1][..], 16);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(
                     image,
@@ -186,11 +170,12 @@ fn blur_specialized(image: &mut FusableImage, sigma: f32) {
         }
         7 => {
             // Pascal row 6: [1, 6, 15, 20, 15, 6, 1] -> sum = 64
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 6, 15, 20, 15, 6, 1][..], 64);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(
                     image,
@@ -257,21 +242,7 @@ mod tests {
         assert_eq!(gb.quality, BlurQuality::Exact);
     }
 
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_gaussian_blur_sigma_opencv_constant() {
-        // Test that OpenCV backend preserves constant images
-        let mut data = vec![128u8; 512 * 512 * 3];
-        let mut img = FusableImage::new(&mut data, 512, 512, 3);
 
-        let result = GaussianBlurSigma::new(2.0).execute(&mut img);
-
-        // OpenCV should preserve constant images exactly
-        assert!(
-            img.data.iter().all(|&p| p == 128),
-            "OpenCV backend failed to preserve constant image"
-        );
-    }
 
     #[test]
     fn test_gaussian_blur_sigma_default() {

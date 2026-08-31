@@ -49,9 +49,26 @@ from sinter import (
 
 WARMUP_RUNS = 5
 BENCHMARK_RUNS = 100
+BENCHMARK_BATCHES = 5
 
 # Global filter state (mutable container to avoid global keyword issues)
 _FILTER_STATE = {"cats": None, "names": None}
+
+
+def timeit_min(fn, img, runs, batches=BENCHMARK_BATCHES, warmup=WARMUP_RUNS):
+    """Min-of-batches timing with a shared warmup. Both sides receive the same
+    per-call input so harness overhead cancels in ratios."""
+    for _ in range(warmup):
+        fn(img)
+    best = float("inf")
+    for _ in range(batches):
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn(img)
+        batch = (time.perf_counter() - start) / runs * 1000
+        best = min(best, batch)
+    return best
+
 
 def should_run(transform_name, categories, transforms):
     """Check if a transform should be benchmarked based on filters"""
@@ -91,27 +108,21 @@ def benchmark_transform(name, albumentations_transform, sinter_transform_factory
     # Skip if not in filter
     if not should_run(name, _FILTER_STATE["cats"], _FILTER_STATE["names"]):
         return None, None, None
-    # Warmup sinter
     sinter_pipe = Compose([sinter_transform_factory()])
-    for _ in range(WARMUP_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-
-    # Benchmark sinter
-    start = time.perf_counter()
-    for _ in range(runs):
-        _ = sinter_pipe.apply(img.copy())
-    sinter_time = (time.perf_counter() - start) / runs * 1000
+    sinter_time = timeit_min(sinter_pipe.apply, img.copy(), runs)
 
     if HAS_ALBUMENTATIONS and albumentations_transform is not None:
-        # Warmup albumentations
-        for _ in range(WARMUP_RUNS):
-            _ = albumentations_transform(image=img.copy())
+        # Materialize albumentations output inside the timed region: transforms
+        # like Crop return a zero-copy view, which would otherwise hide the
+        # real work behind a fake "win" vs sinter's materialized output.
+        def alb_timed(x):
+            res = albumentations_transform(image=x)
+            if isinstance(res, dict):
+                np.ascontiguousarray(res["image"])
+            else:
+                np.ascontiguousarray(res)
 
-        # Benchmark albumentations
-        start = time.perf_counter()
-        for _ in range(runs):
-            _ = albumentations_transform(image=img.copy())
-        albumentations_time = (time.perf_counter() - start) / runs * 1000
+        albumentations_time = timeit_min(alb_timed, img.copy(), runs)
 
         speedup = albumentations_time / sinter_time
         return albumentations_time, sinter_time, speedup
@@ -270,6 +281,9 @@ def run_benchmarks():
             print_row("ToRGB", albumentations_time, sinter_time, speedup)
 
         # Saturation - Albumentations has HueSaturationValue, use fixed sat_shift_limit for comparison
+        # NOTE: semantics differ — alb applies ADDITIVE shifts in cv2 HSV space
+        # (sat += 30/255), sinter applies MULTIPLICATIVE scales (sat *= 1.3).
+        # The ratio is op-vs-op timing, not a like-for-like comparison.
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
                 "HueSaturationValue",
@@ -364,6 +378,9 @@ def run_benchmarks():
             print_row("MultiplicativeNoise", albumentations_time, sinter_time, speedup)
 
         # HueSaturationValue - Albumentations equivalent exists
+        # NOTE: semantics differ — alb uses additive shifts (hue+10 in 0..179,
+        # sat+10, val+10 in 0..255), sinter uses hue_shift degrees + multiplicative
+        # sat/val scales. The ratio is op-vs-op timing, not like-for-like.
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
                 "HueSaturationValue",
@@ -548,6 +565,14 @@ def run_benchmarks():
             print_row("GaussianBlur(3x3)", albumentations_time, sinter_time, speedup)
 
             albumentations_time, sinter_time, speedup = benchmark_transform(
+                "GaussianBlur(5x5)",
+                A.Compose([A.GaussianBlur(blur_limit=(5, 5), p=1.0)]),
+                lambda: GaussianBlur(kernel_size=5),
+                img
+            )
+            print_row("GaussianBlur(5x5)", albumentations_time, sinter_time, speedup)
+
+            albumentations_time, sinter_time, speedup = benchmark_transform(
                 "GaussianBlur(7x7)",
                 A.Compose([A.GaussianBlur(blur_limit=(7, 7), p=1.0)]),
                 lambda: GaussianBlur(kernel_size=7),
@@ -557,21 +582,33 @@ def run_benchmarks():
         else:
             albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(3x3)", None, lambda: GaussianBlur(kernel_size=3), img)
             print_row("GaussianBlur(3x3)", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(5x5)", None, lambda: GaussianBlur(kernel_size=5), img)
+            print_row("GaussianBlur(5x5)", albumentations_time, sinter_time, speedup)
             albumentations_time, sinter_time, speedup = benchmark_transform("GaussianBlur(7x7)", None, lambda: GaussianBlur(kernel_size=7), img)
             print_row("GaussianBlur(7x7)", albumentations_time, sinter_time, speedup)
 
         # MedianBlur - Albumentations equivalent exists
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
-                "MedianBlur",
+                "MedianBlur(3x3)",
                 A.Compose([A.MedianBlur(blur_limit=(3, 3), p=1.0)]),
                 lambda: MedianBlur(kernel_size=3),
                 img
             )
-            print_row("MedianBlur", albumentations_time, sinter_time, speedup)
+            print_row("MedianBlur(3x3)", albumentations_time, sinter_time, speedup)
+
+            albumentations_time, sinter_time, speedup = benchmark_transform(
+                "MedianBlur(5x5)",
+                A.Compose([A.MedianBlur(blur_limit=(5, 5), p=1.0)]),
+                lambda: MedianBlur(kernel_size=5),
+                img
+            )
+            print_row("MedianBlur(5x5)", albumentations_time, sinter_time, speedup)
         else:
-            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur", None, lambda: MedianBlur(kernel_size=3), img)
-            print_row("MedianBlur", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur(3x3)", None, lambda: MedianBlur(kernel_size=3), img)
+            print_row("MedianBlur(3x3)", albumentations_time, sinter_time, speedup)
+            albumentations_time, sinter_time, speedup = benchmark_transform("MedianBlur(5x5)", None, lambda: MedianBlur(kernel_size=5), img)
+            print_row("MedianBlur(5x5)", albumentations_time, sinter_time, speedup)
 
         # Sharpen - Albumentations equivalent exists
         if HAS_ALBUMENTATIONS:

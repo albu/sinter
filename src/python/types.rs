@@ -121,8 +121,18 @@ pub fn barrier_image_to_numpy<'py>(
 pub fn barrier_image_to_numpy_owned<'py>(
     py: Python<'py>,
     img: BarrierImage,
-) -> PyResult<&'py PyArray3<u8>> {
+) -> PyResult<&'py PyAny> {
     let shape = [img.height, img.width, img.channels];
+
+    // Float32 terminal barrier (Normalize output)
+    if let Some(f32_data) = img.f32_data {
+        let array_1d = PyArray1::from_vec(py, f32_data);
+        let array_3d = array_1d.reshape(shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to reshape array: {}", e)
+            ))?;
+        return Ok(array_3d.as_ref());
+    }
 
     // Use from_vec to take ownership - NO CLONE!
     let array_1d = PyArray1::from_vec(py, img.data);
@@ -133,7 +143,7 @@ pub fn barrier_image_to_numpy_owned<'py>(
             format!("Failed to reshape array: {}", e)
         ))?;
 
-    Ok(array_3d)
+    Ok(array_3d.as_ref())
 }
 
 #[cfg(test)]

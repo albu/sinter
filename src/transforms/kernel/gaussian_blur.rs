@@ -4,12 +4,13 @@
 // Uses NEON-optimized separable convolution for 3x3, 5x5, 7x7 kernels.
 //
 // For sigma-based Gaussian blur with arbitrary kernel sizes, use GaussianBlurSigma
-// which forwards to OpenCV's highly optimized implementation.
+// (native Rust decision-tree: specialized Pascal kernels for sigma <= 1.5, symmetric
+// separable convolution for larger sigma, box-blur approximation in Fast quality).
 //
-// PERFORMANCE:
-// - 3x3: ~650 MP/s (NEON SIMD separable)
-// - 5x5: ~730 MP/s (NEON SIMD separable)
-// - 7x7: ~385 MP/s (NEON SIMD separable)
+// PERFORMANCE (RGB, Apple M4, min-of-batches, cv2 5.0.0 sigma=0 baseline):
+// - 3x3: ~4200-5000 MP/s (interleaved fused rolling separable)
+// - 5x5: ~1900-2700 MP/s
+// - 7x7: ~1000-1700 MP/s
 
 use super::convolve::convolve_separable;
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
@@ -17,11 +18,11 @@ use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transfor
 /// Kernel size for Gaussian blur
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KernelSize {
-    /// 3x3 kernel via separable convolution (fastest, light blur, ~650 MP/s)
+    /// 3x3 kernel via separable convolution (fastest, light blur, ~4200-5000 MP/s)
     Size3,
-    /// 5x5 kernel via separable convolution (fast, moderate blur, ~730 MP/s)
+    /// 5x5 kernel via separable convolution (fast, moderate blur, ~1900-2700 MP/s)
     Size5,
-    /// 7x7 kernel via separable convolution (fast, strong blur, ~385 MP/s)
+    /// 7x7 kernel via separable convolution (fast, strong blur, ~1000-1700 MP/s)
     Size7,
 }
 
@@ -31,9 +32,9 @@ pub enum KernelSize {
 /// Uses NEON-optimized separable convolution for 3×3, 5×5, and 7×7 kernels.
 ///
 /// **Performance:**
-/// - 3×3: Pascal row 2 [1, 2, 1] → ~650 MP/s
-/// - 5×5: Pascal row 4 [1, 4, 6, 4, 1] → ~730 MP/s
-/// - 7×7: Pascal row 6 [1, 6, 15, 20, 15, 6, 1] → ~385 MP/s
+/// - 3×3: Pascal row 2 [1, 2, 1] → ~4200-5000 MP/s
+/// - 5×5: Pascal row 4 [1, 4, 6, 4, 1] → ~1900-2700 MP/s
+/// - 7×7: Pascal row 6 [1, 6, 15, 20, 15, 6, 1] → ~1000-1700 MP/s
 ///
 /// All configurations preserve constant images correctly.
 ///
@@ -101,12 +102,12 @@ impl GaussianBlur {
                 // 3x3 Gaussian - use unified separable convolution [1 2 1] for SIMD
                 // Preserves u16 precision between horizontal and vertical passes!
                 let kernel = [1, 2, 1];
-                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                #[cfg(target_arch = "aarch64")]
                 {
                     use super::convolve_simd;
                     convolve_simd::convolve_separable_detect(image, &kernel[..], 4);
                 }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     convolve_separable(image, &kernel[..], 4);
                 }
@@ -114,19 +115,27 @@ impl GaussianBlur {
             KernelSize::Size5 => {
                 // 5x5 Gaussian - use separable convolution [1 4 6 4 1] for SIMD
                 let kernel = [1, 4, 6, 4, 1];
-                convolve_separable(image, &kernel[..], 16);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    use super::convolve_simd;
+                    convolve_simd::convolve_separable_detect(image, &kernel[..], 16);
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    convolve_separable(image, &kernel[..], 16);
+                }
             }
             KernelSize::Size7 => {
-                // 7x7 discrete convolution - faster than box blur for small kernels
-                // Pascal's triangle row 6: [1, 6, 15, 20, 15, 6, 1]
+                // 7x7 discrete convolution matching OpenCV's Gaussian kernel (sigma=1.4)
+                // [2, 7, 14, 18, 14, 7, 2] / 64
                 // Sum = 64
-                let kernel = [1i32, 6, 15, 20, 15, 6, 1];
-                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                let kernel = [2i32, 7, 14, 18, 14, 7, 2];
+                #[cfg(target_arch = "aarch64")]
                 {
                     use super::convolve_simd;
                     convolve_simd::convolve_separable_detect(image, &kernel[..], 64);
                 }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     convolve_separable(image, &kernel[..], 64);
                 }
@@ -247,5 +256,54 @@ mod tests {
 
         // Mean should be approximately preserved (within rounding error)
         assert!((new_mean as i32 - original_mean as i32).abs() <= 1);
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod fused_path_tests {
+    use super::*;
+    use crate::core::FusableImage;
+
+    #[test]
+    fn test_full_gaussian3_correct() {
+        let (w, h) = (256usize, 256usize);
+        let mut data: Vec<u8> = (0..w * h * 3)
+            .map(|i| ((i as u64 * 2654435761) % 256) as u8)
+            .collect();
+        let original = data.clone();
+        let mut img = FusableImage::new(&mut data, w, h, 3);
+        GaussianBlur::with_kernel_size(KernelSize::Size3).execute(&mut img);
+
+        // scalar two-pass reference
+        let ch = 3usize;
+        let mut htmp = vec![0u8; original.len()];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..ch {
+                    let mut s: u32 = 0;
+                    for k in 0..3 {
+                        let px = (x as i32 + k as i32 - 1).clamp(0, w as i32 - 1) as usize;
+                        s += original[(y * w + px) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    htmp[(y * w + x) * ch + c] = (s >> 2) as u8;
+                }
+            }
+        }
+        let mut expected = vec![0u8; original.len()];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..ch {
+                    let mut s: u32 = 0;
+                    for k in 0..3 {
+                        let py = (y as i32 + k as i32 - 1).clamp(0, h as i32 - 1) as usize;
+                        s += htmp[(py * w + x) * ch + c] as u32 * [1, 2, 1][k];
+                    }
+                    expected[(y * w + x) * ch + c] = (s >> 2) as u8;
+                }
+            }
+        }
+        let mm = data.iter().zip(expected.iter()).filter(|(a, b)| a != b).count();
+        let mx = data.iter().zip(expected.iter()).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap_or(0);
+        assert_eq!(mm, 0, "full GaussianBlur3 mismatch: {} px, max_diff={}", mm, mx);
     }
 }

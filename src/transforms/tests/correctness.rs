@@ -627,7 +627,8 @@ mod correctness {
 
     #[test]
     fn test_normalize_correctness() {
-        // Test various mean/std combinations
+        // Test various mean/std combinations.
+        // Output is float32: out = (v / 255 - mean) / std (no clamping).
         for &(mean, std) in &[(-0.5f32, 0.5f32), (0.0, 1.0), (0.5, 1.5)] {
             for &channels in &[1u8, 3u8] {
                 let input = create_gradient_image(TEST_WIDTH, TEST_HEIGHT, channels);
@@ -635,17 +636,18 @@ mod correctness {
                 let mut img = FusableImage::new(&mut data, TEST_WIDTH, TEST_HEIGHT, channels as usize);
 
                 let normalize = Normalize::new(mean, std);
-                normalize.execute(&mut img);
+                let barrier = normalize.execute(&mut img).expect("Normalize returns a float32 barrier");
 
-                // Verify normalization: output[i] = clamp((input[i]/255 - mean) / std * 255, 0, 255)
+                assert!(barrier.is_f32());
+                let out = barrier.f32_data.as_ref().unwrap();
+                assert_eq!(out.len(), input.len());
+
                 for (i, &inp) in input.iter().enumerate() {
-                    let normalized = inp as f32 / 255.0;
-                    let result = (normalized - mean) / std;
-                    let expected = (result * 255.0).clamp(0.0, 255.0) as u8;
-                    assert_eq!(
-                        img.data[i], expected,
+                    let expected = (inp as f32 / 255.0 - mean) / std;
+                    assert!(
+                        (out[i] - expected).abs() < 1e-5,
                         "Normalize mismatch at index {}: mean={}, std={}, expected {}, got {}",
-                        i, mean, std, expected, img.data[i]
+                        i, mean, std, expected, out[i]
                     );
                 }
             }

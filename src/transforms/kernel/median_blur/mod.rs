@@ -5,8 +5,10 @@
 
 mod fast;
 mod huang;
-#[cfg(feature = "opencv")]
-mod opencv;
+mod histogram;
+#[cfg(target_arch = "aarch64")]
+mod neon;
+pub mod sorting_network;
 
 use crate::core::{AccessPattern, BarrierImage, Executable, FusableImage, ShapeEffect, Transform};
 
@@ -19,20 +21,8 @@ pub enum MedianKernelSize {
     Kernel5,
 }
 
-/// Median blur uses OpenCV (when available) or sliding-window histogram algorithm.
-///
-/// - With OpenCV feature: Uses OpenCV's optimized sliding-window median (exact, fast)
-/// - Without OpenCV: Uses native sliding-window histogram algorithm (exact, ~3-5x faster than per-pixel)
-///
-/// The sliding-window histogram maintains a histogram as the 3x3 window slides across
-/// the image. When moving one pixel to the right:
-/// - Removes 3 outgoing pixels (left column)
-/// - Adds 3 incoming pixels (right column)
-/// - Updates median incrementally (usually 0-1 steps)
-///
-/// This is the same algorithmic approach that makes OpenCV fast, avoiding per-pixel
-/// recomputation. Per-pixel exact implementations were removed as they are ~16x slower
-/// due to the lack of sliding-window reuse.
+/// Median blur uses high-performance branchless sorting networks (SIMD on ARM/x86)
+/// or sliding-window histogram.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MedianMode {
     Fast,
@@ -40,7 +30,6 @@ pub enum MedianMode {
 
 impl Default for MedianMode {
     fn default() -> Self {
-        // Always use Fast mode - OpenCV is selected via feature flag in execute()
         MedianMode::Fast
     }
 }
@@ -53,14 +42,12 @@ impl Default for MedianMode {
 ///
 /// # Implementation
 ///
-/// - **With OpenCV feature**: Uses OpenCV's highly optimized `medianBlur` which
-///   employs a sliding-window histogram algorithm for exact results
-/// - **Without OpenCV**: Uses native sliding-window histogram algorithm for exact
-///   results (~3-5x faster than per-pixel exact approaches)
-///
-/// The sliding-window histogram algorithm maintains a histogram as the window
-/// slides, updating incrementally instead of recomputing per pixel. This is the
-/// same algorithmic approach that makes OpenCV fast.
+/// - **3x3 kernel**: ARM NEON column-cache construction (sort3 on each column +
+///   median-of-sorted-columns combine, ~28 vector min/max ops per 16 lanes),
+///   with the 19-comparator `median9` selection network as the scalar fallback.
+/// - **5x5 kernel**: ARM NEON 140-comparator odd-even mergesort network (25-input
+///   sort, median at position 12). A sliding column-histogram implementation exists
+///   but is ~8-13x slower on ARM64 and is used only off-ARM / for tiny images.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MedianBlur {
     pub kernel_size: MedianKernelSize,
@@ -90,9 +77,6 @@ impl MedianBlur {
     }
 
     /// Create a 5x5 median blur
-    ///
-    /// Note: 5x5 requires OpenCV feature for acceptable performance.
-    /// Without OpenCV, this will fall back to repeated 3x3 operations.
     pub fn kernel5() -> Self {
         Self {
             kernel_size: MedianKernelSize::Kernel5,
@@ -100,16 +84,65 @@ impl MedianBlur {
         }
     }
 
-    /// Pure Rust implementation (used as fallback or when opencv feature is disabled)
-    fn execute_rust(&self, image: &mut FusableImage) {
+    /// Native Rust execution path
+    fn execute_native(&self, image: &mut FusableImage) {
         match self.kernel_size {
-            MedianKernelSize::Kernel3 => huang::apply_median_blur_3x3_huang(image),
-            MedianKernelSize::Kernel5 => {
-                // For 5x5 without OpenCV, apply 3x3 twice as a reasonable approximation
-                // (better than slow per-pixel implementation)
-                huang::apply_median_blur_3x3_huang(image);
-                huang::apply_median_blur_3x3_huang(image);
+            MedianKernelSize::Kernel3 => {
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    neon::apply_median_blur_3x3_neon(
+                        &mut image.data,
+                        image.width,
+                        image.height,
+                        image.channels,
+                    );
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    sorting_network::apply_median_blur_3x3_scalar(
+                        &mut image.data,
+                        image.width,
+                        image.height,
+                        image.channels,
+                    );
+                }
             }
+            MedianKernelSize::Kernel5 => {
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    neon::apply_median_blur_5x5_neon(
+                        &mut image.data,
+                        image.width,
+                        image.height,
+                        image.channels,
+                    );
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    histogram::apply_median_blur_5x5(image);
+                }
+            }
+        }
+    }
+
+    fn execute_3x3(&self, image: &mut FusableImage) {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            neon::apply_median_blur_3x3_neon(
+                &mut image.data,
+                image.width,
+                image.height,
+                image.channels,
+            );
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            sorting_network::apply_median_blur_3x3_scalar(
+                &mut image.data,
+                image.width,
+                image.height,
+                image.channels,
+            );
         }
     }
 }
@@ -134,25 +167,7 @@ impl Transform for MedianBlur {
 
 impl Executable for MedianBlur {
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        #[cfg(feature = "opencv")]
-        {
-            // Always try OpenCV first when available
-            let kernel_size = match self.kernel_size {
-                MedianKernelSize::Kernel3 => 3,
-                MedianKernelSize::Kernel5 => 5,
-            };
-            match opencv::execute_opencv(image, kernel_size) {
-                Ok(_) => return None,
-                Err(_) => {
-                    // Fall back to Rust implementation
-                    self.execute_rust(image);
-                }
-            }
-        }
-        #[cfg(not(feature = "opencv"))]
-        {
-            self.execute_rust(image);
-        }
+        self.execute_native(image);
         None
     }
 }
@@ -310,5 +325,55 @@ mod tests {
         assert_ne!(img.data[10], 0);
         assert_ne!(img.data[50], 255);
         assert_ne!(img.data[90], 0);
+    }
+
+    #[test]
+    #[ignore = "manual micro-benchmark: cargo test --release -- --ignored median_bench_5x5 --nocapture"]
+    fn median_bench_5x5() {
+        use std::time::Instant;
+        let (w, h) = (512usize, 512usize);
+        for channels in [1usize, 3usize] {
+            let mut data: Vec<u8> = (0..w * h * channels)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) >> 32) & 0xFF) as u8)
+                .collect();
+
+            // Warmup both paths.
+            for _ in 0..3 {
+                let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                MedianBlur::kernel5().execute(&mut img);
+                let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                histogram::apply_median_blur_5x5(&mut img);
+            }
+
+            let mut best_sortnet = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                for _ in 0..10 {
+                    let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                    MedianBlur::kernel5().execute(&mut img);
+                }
+                best_sortnet = best_sortnet.min(t.elapsed().as_secs_f64() / 10.0 * 1000.0);
+            }
+
+            let mut best_hist = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                for _ in 0..10 {
+                    let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                    histogram::apply_median_blur_5x5(&mut img);
+                }
+                best_hist = best_hist.min(t.elapsed().as_secs_f64() / 10.0 * 1000.0);
+            }
+
+            println!(
+                "median5x5 {}x{} channels={}: sortnet {:.4} ms | histogram {:.4} ms | ratio {:.2}x",
+                w,
+                h,
+                channels,
+                best_sortnet,
+                best_hist,
+                best_hist / best_sortnet
+            );
+        }
     }
 }

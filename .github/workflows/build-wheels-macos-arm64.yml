@@ -1,4 +1,4 @@
-name: Build Wheels (macOS ARM64 + Static OpenCV)
+name: Build Wheels (Native Rust + SIMD)
 
 on:
   push:
@@ -16,10 +16,6 @@ jobs:
   build-wheel:
     runs-on: macos-14
 
-    env:
-      OPENCV_VERSION: "4.12.0"
-      OPENCV_STATIC_DIR: "${{ github.workspace }}/opencv-static/build"
-
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -27,47 +23,32 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-
-    - name: Cache OpenCV static build
-      id: cache-opencv
-      uses: actions/cache@v4
-      with:
-        path: opencv-static
-        key: opencv-${{ env.OPENCV_VERSION }}-${{ runner.os }}-arm64-${{ hashFiles('scripts/build_opencv_static.sh') }}
-        restore-keys: |
-          opencv-${{ env.OPENCV_VERSION }}-${{ runner.os }}-arm64-
-
-    - name: Build OpenCV (if not cached)
-      if: steps.cache-opencv.outputs.cache-hit != 'true'
-      run: |
-        echo "Building OpenCV ${OPENCV_VERSION} from source..."
-        ./scripts/build_opencv_static.sh
-
-    - name: Verify OpenCV build
-      run: |
-        ls -lh opencv-static/build/lib/libopencv_*.a
+        python-version: '3.12'
 
     - name: Install maturin
       run: |
         pip install maturin
 
-    - name: Build wheel with static OpenCV
+    - name: Build wheel (Pure Native Rust + ARM NEON)
       run: |
-        source scripts/setup_static_opencv.sh
-        export DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib:$DYLD_LIBRARY_PATH
-        maturin build --release --features "python,opencv-static" --out dist
+        maturin build --release --features "python" --out dist
 
-    - name: Verify static linking
+    - name: Verify wheel
       run: |
         WHEEL=$(ls dist/*.whl | head -1)
         echo "Wheel: $WHEEL"
         ls -lh "$WHEEL"
 
+    - name: Test wheel installation
+      run: |
+        pip install pytest numpy
+        pip install dist/*.whl
+        pytest python/tests/
+
     - name: Upload wheel as artifact
       uses: actions/upload-artifact@v4
       with:
-        name: sinter-macos-arm64-static-opencv
+        name: sinter-macos-arm64
         path: dist/*.whl
         retention-days: 30
 
@@ -78,3 +59,36 @@ jobs:
         files: dist/*.whl
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Heavy cross-validation: compares sinter against OpenCV/Albumentations
+  # ground truth and runs the torch interop suite. Kept off the main wheel
+  # build (torch + opencv are ~300MB of test-only dependencies); runs on
+  # release tags and manual dispatch.
+  cross-validation:
+    needs: build-wheel
+    runs-on: macos-14
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Download wheel artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sinter-macos-arm64
+        path: dist
+
+    - name: Install dependencies
+      run: |
+        pip install pytest numpy opencv-python-headless albumentations torch
+
+    - name: Test wheel installation
+      run: |
+        pip install dist/*.whl
+        pytest python/tests/

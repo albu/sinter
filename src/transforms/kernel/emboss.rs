@@ -1,16 +1,9 @@
 // Emboss transform
 //
 // Applies an embossing convolution kernel to create a 3D relief effect.
-// When the `opencv` feature is enabled, uses OpenCV's optimized filter2D.
 
 use super::convolve::convolve_3x3;
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
-
-#[cfg(feature = "opencv")]
-use opencv::{
-    core::{Mat, MatTraitConst, BORDER_CONSTANT, CV_8U, CV_MAKETYPE},
-    imgproc,
-};
 
 /// Direction for emboss effect
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,26 +108,13 @@ impl Transform for Emboss {
 
 impl Executable for Emboss {
     fn execute(&self, image: &mut FusableImage) -> Option<crate::core::BarrierImage> {
-        #[cfg(feature = "opencv")]
-        {
-            match self.execute_opencv(image) {
-                Ok(_) => return None,
-                Err(e) => {
-                    eprintln!("OpenCV Emboss failed: {}, using pure Rust fallback", e);
-                    self.execute_rust(image);
-                }
-            }
-        }
-        #[cfg(not(feature = "opencv"))]
-        {
-            self.execute_rust(image);
-        }
+        self.execute_rust(image);
         None
     }
 }
 
 impl Emboss {
-    /// Pure Rust implementation (used as fallback or when opencv feature is disabled)
+    /// Pure Rust implementation (all platforms; no OpenCV dependency)
     fn execute_rust(&self, image: &mut FusableImage) {
         // Blend-based emboss kernel (compatible with albumentations)
         // kernel = (1 - alpha) * identity + alpha * emboss_effect
@@ -173,82 +153,88 @@ impl Emboss {
         // This gives us 8 bits of fractional precision
         let kernel_i32: [i32; 9] = std::array::from_fn(|i| (kernel_f32[i] * 256.0) as i32);
 
-        // Apply convolution with scale=256 (to undo the fixed-point scaling)
-        // No offset needed since center weight is ~1.0
-        convolve_3x3(image, &kernel_i32, 256, 0);
-    }
-
-    /// OpenCV implementation with zero-copy data wrapping
-    #[cfg(feature = "opencv")]
-    fn execute_opencv(&self, image: &mut FusableImage) -> opencv::Result<()> {
-        // Removed OnceLock - set_num_threads(1) is called once per process startup
-        // The overhead from checking OnceLock was measurable
-
-        let rows = image.height as i32;
-        let cols = image.width as i32;
-        let channels = image.channels as i32;
-        let cv_type = CV_MAKETYPE(CV_8U, channels);
-
-        // Blend-based emboss kernel (compatible with albumentations)
-        let s = self.strength;
-        let a = self.alpha;
-
-        // Emboss effect kernel for each direction
-        let effect = match self.direction {
-            EmbossDirection::SouthEast => [-1.0f32 - s, -s, 0.0, -s, 1.0, s, 0.0, s, 1.0 + s],
-            EmbossDirection::SouthWest => [0.0f32, -s, -1.0 - s, s, 1.0, -s, 1.0 + s, s, 0.0],
-            EmbossDirection::NorthEast => [1.0f32 + s, s, 0.0, s, 1.0, -s, 0.0, -s, -1.0 - s],
-            EmbossDirection::NorthWest => [0.0f32, s, 1.0 + s, -s, 1.0, s, -1.0 - s, -s, 0.0],
-        };
-
-        // Identity kernel
-        let identity = [0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
-
-        // Blend: (1 - alpha) * identity + alpha * effect
-        let kernel_data: Vec<f32> = (0..9)
-            .map(|i| (1.0 - a) * identity[i] + a * effect[i])
-            .collect();
-
-        unsafe {
-            let src_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                rows,
-                cols,
-                cv_type,
-                image.data.as_mut_ptr() as *mut std::ffi::c_void,
-            )?;
-            let mut dst_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                rows,
-                cols,
-                cv_type,
-                image.data.as_mut_ptr() as *mut std::ffi::c_void,
-            )?;
-
-            let kernel_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                3,
-                3,
-                opencv::core::CV_32F,
-                kernel_data.as_ptr() as *mut std::ffi::c_void,
-            )?;
-
-            // No delta needed - blend-based kernel keeps values in valid range
-            imgproc::filter_2d(
-                &src_mat,
-                &mut dst_mat,
-                -1, // Same depth as source
-                &kernel_mat,
-                opencv::core::Point::default(),
-                0.0, // No offset (blend-based approach)
-                BORDER_CONSTANT,
-            )?;
-        }
-
-        Ok(())
+        super::convolve_2d::apply_emboss(image, &kernel_i32);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::FusableImage;
+
+    fn reference_emboss(data: &[u8], w: usize, h: usize, k: &[i32; 9]) -> Vec<u8> {
+        let mut out = vec![0u8; data.len()];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let mut sum = 0i32;
+                    for ky in 0..3 {
+                        for kx in 0..3 {
+                            let xx = (x as i32 + kx as i32 - 1).clamp(0, w as i32 - 1) as usize;
+                            let yy = (y as i32 + ky as i32 - 1).clamp(0, h as i32 - 1) as usize;
+                            sum += data[(yy * w + xx) * 3 + c] as i32 * k[ky * 3 + kx];
+                        }
+                    }
+                    out[(y * w + x) * 3 + c] = (sum / 256).clamp(0, 255) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_emboss_neon_matches_reference() {
+        let w = 32;
+        let h = 32;
+        let mut data: Vec<u8> = (0..w * h * 3)
+            .map(|i| ((i * 37 + 11) % 256) as u8)
+            .collect();
+        let input = data.clone();
+
+        // NE kernel with alpha=0.5, strength=0.5 (Q8 fixed point)
+        let s = 0.5f32;
+        let a = 0.5f32;
+        let effect = [
+            1.0 + s, s, 0.0, s, 1.0, -s, 0.0, -s, -1.0 - s,
+        ];
+        let identity = [0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let kernel_f32: [f32; 9] = std::array::from_fn(|i| (1.0 - a) * identity[i] + a * effect[i]);
+        let kernel_i32: [i32; 9] = std::array::from_fn(|i| (kernel_f32[i] * 256.0) as i32);
+
+        let expected = reference_emboss(&input, w, h, &kernel_i32);
+
+        let mut img = FusableImage::new(&mut data, w, h, 3);
+        super::super::convolve_2d::apply_emboss(&mut img, &kernel_i32);
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for i in 0..data.len() {
+            let diff = (data[i] as i32 - expected[i] as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 10 {
+                    let px = i / 3;
+                    eprintln!(
+                        "  byte {} (x={}, y={}, c={}): got={} expected={}",
+                        i,
+                        px % w,
+                        px / w,
+                        i % 3,
+                        data[i],
+                        expected[i]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            mismatches,
+            0,
+            "emboss NEON vs reference: {} mismatches, max_diff={}",
+            mismatches,
+            max_diff
+        );
+    }
 
     #[test]
     fn test_emboss_new() {

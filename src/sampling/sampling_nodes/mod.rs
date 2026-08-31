@@ -7,11 +7,20 @@
 // Vec<SampledImageOp> to the SampledImageProgram.
 
 use crate::core::{AccessPattern, ShapeEffect};
-use crate::sampled_ir::ops::{EdgeMethod, EmbossDirection, Interpolation, PadMode, RotateAngle};
+use crate::sampled_ir::ops::{BorderMode, EdgeMethod, EmbossDirection, Interpolation, PadMode, RotateAngle};
 use crate::sampled_ir::SampledImageOp;
 
 // Re-export distributions for use in sampling
 pub use super::distributions::{Bernoulli, Dist, Uniform, UniformInt};
+
+/// Draw a per-op 64-bit seed from the pipeline RNG. Keeps noise/dropout
+/// transforms stochastic per pipeline execution (same pipeline seed ->
+/// reproducible, different seeds -> different noise).
+fn draw_seed(rng: &mut dyn Rng) -> u64 {
+    let hi = rng.random_i32(i32::MAX) as u64;
+    let lo = rng.random_i32(i32::MAX) as u64;
+    (hi << 32) | lo
+}
 
 // Re-export the Rng trait
 pub use super::traits::Rng;
@@ -59,6 +68,7 @@ impl<'a> SamplingContext<'a> {
 /// - No allocation during sampling (just reads enum variants)
 /// - No vtable lookups (pattern matching on enum)
 /// - Cache-friendly (sequential memory access)
+#[derive(Clone)]
 pub enum RandomImageNode {
     // =========================================================================
     // Leaf Transforms (Parameters only, NO activation)
@@ -82,6 +92,10 @@ pub enum RandomImageNode {
         width: Dist,
         height: Dist,
     },
+    RandomCrop {
+        width: u32,
+        height: u32,
+    },
     Pad {
         top: Dist,
         bottom: Dist,
@@ -96,6 +110,7 @@ pub enum RandomImageNode {
         translate: (Dist, Dist), // (translate_x, translate_y) in pixels
         shear: (Dist, Dist),     // (shear_x, shear_y)
         interpolation: Interpolation,
+        border_mode: BorderMode,
     },
 
     // Photometric transforms
@@ -120,7 +135,9 @@ pub enum RandomImageNode {
         std: Dist,
     },
     Equalize,
-    AutoContrast,
+    AutoContrast {
+        cutoff: Dist,
+    },
     ToGray,
     ToSepia,
     ToRGB,
@@ -294,6 +311,18 @@ impl RandomImageNode {
                     height: sampled_h,
                 });
             }
+            RandomImageNode::RandomCrop { width, height } => {
+                // Position resolves against the actual image size at execution
+                // time, so only the fractional anchors are sampled here.
+                let fx = ctx.rng.random_f32();
+                let fy = ctx.rng.random_f32();
+                out.push(SampledImageOp::RandomCrop {
+                    width: *width,
+                    height: *height,
+                    fx,
+                    fy,
+                });
+            }
             RandomImageNode::Pad {
                 top,
                 bottom,
@@ -330,6 +359,7 @@ impl RandomImageNode {
                 translate,
                 shear,
                 interpolation,
+                border_mode,
             } => {
                 let sampled_scale_x = scale.0.sample_f32(ctx.rng);
                 let sampled_scale_y = scale.1.sample_f32(ctx.rng);
@@ -339,39 +369,13 @@ impl RandomImageNode {
                 let sampled_shear_x = shear.0.sample_f32(ctx.rng);
                 let sampled_shear_y = shear.1.sample_f32(ctx.rng);
 
-                // Build 2x3 affine matrix [a, b, c, d, e, f] for inverse mapping
-                // This matches OpenCV's format for warp_affine
-                let angle_rad = sampled_rotate.to_radians();
-                let cos_a = angle_rad.cos();
-                let sin_a = angle_rad.sin();
-
-                // Forward transform components
-                let sx = sampled_scale_x;
-                let sy = sampled_scale_y;
-                let tx = sampled_translate_x;
-                let ty = sampled_translate_y;
-                let _shx = sampled_shear_x.tan();
-                let _shy = sampled_shear_y.tan();
-
-                // Build inverse matrix for backward mapping
-                // Simplified: scale + rotate + translate (no shear for now)
-                let inv_scale_x = if sx.abs() > 1e-6 { 1.0 / sx } else { 1.0 };
-                let inv_scale_y = if sy.abs() > 1e-6 { 1.0 / sy } else { 1.0 };
-
-                let a = cos_a * inv_scale_x;
-                let b = sin_a * inv_scale_x;
-                let d = -sin_a * inv_scale_y;
-                let e = cos_a * inv_scale_y;
-                let c = -tx * a - ty * d;
-                let f = -tx * b - ty * e;
-
-                let matrix = [a, b, c, d, e, f];
-                let border_mode = crate::sampled_ir::ops::BorderMode::Constant { value: 0 };
-
                 out.push(SampledImageOp::Affine {
-                    matrix,
+                    scale: (sampled_scale_x, sampled_scale_y),
+                    rotate: sampled_rotate,
+                    translate: (sampled_translate_x, sampled_translate_y),
+                    shear: (sampled_shear_x, sampled_shear_y),
                     interpolation: *interpolation,
-                    border_mode,
+                    border_mode: *border_mode,
                 });
             }
 
@@ -417,10 +421,11 @@ impl RandomImageNode {
             RandomImageNode::Equalize => {
                 out.push(SampledImageOp::Equalize);
             }
-            RandomImageNode::AutoContrast => {
+            RandomImageNode::AutoContrast { cutoff } => {
+                let cutoff = cutoff.sample_f32(ctx.rng);
                 out.push(SampledImageOp::AutoContrast {
-                    cutoff_low: 0.0,
-                    cutoff_high: 1.0,
+                    cutoff_low: cutoff,
+                    cutoff_high: cutoff,
                 });
             }
             RandomImageNode::ToGray => {
@@ -439,12 +444,14 @@ impl RandomImageNode {
                 out.push(SampledImageOp::GaussNoise {
                     mean: sampled_mean,
                     std: sampled_std,
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::MultiplicativeNoise { multiplier } => {
                 let sampled_multiplier = multiplier.sample_f32(ctx.rng);
                 out.push(SampledImageOp::MultiplicativeNoise {
                     multiplier: sampled_multiplier,
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::SaltAndPepper {
@@ -456,6 +463,7 @@ impl RandomImageNode {
                 out.push(SampledImageOp::SaltAndPepper {
                     amount: sampled_amount,
                     salt_vs_pepper: sampled_salt_vs_pepper,
+                    seed: draw_seed(ctx.rng),
                 });
             }
 
@@ -527,6 +535,7 @@ impl RandomImageNode {
                 out.push(SampledImageOp::CoarseDropout {
                     holes: sampled_holes.max(1) as usize,
                     hole_size: (sampled_h, sampled_w),
+                    seed: draw_seed(ctx.rng),
                 });
             }
             RandomImageNode::GridDropout {
@@ -541,6 +550,7 @@ impl RandomImageNode {
                     ratio: sampled_ratio,
                     unit_size: sampled_unit,
                     holes: sampled_holes,
+                    seed: draw_seed(ctx.rng),
                 });
             }
 
@@ -636,6 +646,7 @@ impl RandomImageNode {
             // Geometric: OutOfPlace (shape-changing)
             RandomImageNode::Resize { .. }
             | RandomImageNode::Crop { .. }
+            | RandomImageNode::RandomCrop { .. }
             | RandomImageNode::Pad { .. }
             | RandomImageNode::Affine { .. } => AccessPattern::OutOfPlace,
 
@@ -648,7 +659,7 @@ impl RandomImageNode {
             | RandomImageNode::Gamma { .. }
             | RandomImageNode::Normalize { .. }
             | RandomImageNode::Equalize
-            | RandomImageNode::AutoContrast
+            | RandomImageNode::AutoContrast { .. }
             | RandomImageNode::ToGray
             | RandomImageNode::ToSepia => AccessPattern::InPlace,
 
@@ -705,6 +716,7 @@ impl RandomImageNode {
             // Geometric: shape-changing
             RandomImageNode::Resize { .. } => ShapeEffect::Resize,
             RandomImageNode::Crop { .. } => ShapeEffect::Crop,
+            RandomImageNode::RandomCrop { .. } => ShapeEffect::Crop,
             RandomImageNode::Pad { .. } => ShapeEffect::Pad,
             RandomImageNode::Affine { .. } => ShapeEffect::Resize,
 
@@ -717,7 +729,7 @@ impl RandomImageNode {
             | RandomImageNode::Gamma { .. }
             | RandomImageNode::Normalize { .. }
             | RandomImageNode::Equalize
-            | RandomImageNode::AutoContrast
+            | RandomImageNode::AutoContrast { .. }
             | RandomImageNode::ToGray
             | RandomImageNode::ToSepia
             | RandomImageNode::ToRGB
@@ -784,6 +796,7 @@ fn sample_indices(rng: &mut dyn Rng, n: usize, k: usize) -> Vec<usize> {
 /// This is the user-facing type that holds random transforms before sampling.
 /// It contains a `RandomImageNode` tree which can be sampled to produce
 /// a deterministic `SampledImageProgram`.
+#[derive(Clone)]
 pub struct RandomImageProgram {
     /// The root node (typically All)
     root: RandomImageNode,

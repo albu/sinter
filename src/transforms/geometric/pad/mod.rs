@@ -111,7 +111,9 @@ impl Executable for Pad {
         let channels = image.channels;
         let stride = image.width * channels;
 
-        let mut padded_data = vec![0u8; new_width as usize * new_height as usize * channels];
+        let len = new_width as usize * new_height as usize * channels;
+        let mut padded_data = Vec::with_capacity(len);
+        unsafe { padded_data.set_len(len); }
 
         match self.mode {
             PadMode::Constant(fill) => {
@@ -218,7 +220,9 @@ impl Executable for Pad {
         let channels = image.channels;
         let stride = image.width * channels;
 
-        let mut padded_data = vec![0u8; new_width as usize * new_height as usize * channels];
+        let len = new_width as usize * new_height as usize * channels;
+        let mut padded_data = Vec::with_capacity(len);
+        unsafe { padded_data.set_len(len); }
 
         match self.mode {
             PadMode::Constant(fill) => {
@@ -349,6 +353,139 @@ pub(crate) fn pad_constant_scalar(
     }
 }
 
+/// Fast slice-based padding for Replicate, Wrap, and Reflect modes
+fn pad_fast_slice(
+    dst: &mut [u8],
+    src: &[u8],
+    new_width: usize,
+    src_width: usize,
+    src_height: usize,
+    top: usize,
+    left: usize,
+    channels: usize,
+    mode: PadMode,
+) {
+    let iw = src_width as i32;
+    let ih = src_height as i32;
+    let new_height = dst.len() / (new_width * channels);
+    let dst_stride = new_width * channels;
+    let src_stride = src_width * channels;
+
+    let map_coord = |coord: i32, max_dim: i32| -> usize {
+        let mapped = match mode {
+            PadMode::Constant(_) => 0,
+            PadMode::Replicate => coord.clamp(0, max_dim - 1),
+            PadMode::Wrap => coord.rem_euclid(max_dim),
+            PadMode::Reflect => {
+                let m = if coord < 0 {
+                    -coord - 1
+                } else if coord >= max_dim {
+                    2 * max_dim - coord - 1
+                } else {
+                    coord
+                };
+                m.clamp(0, max_dim - 1)
+            }
+        };
+        mapped as usize
+    };
+
+    let mut x_map = Vec::<usize>::with_capacity(new_width);
+    for px in 0..new_width {
+        let ox = px as i32 - left as i32;
+        let sx = map_coord(ox, iw);
+        x_map.push(sx * channels);
+    }
+
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
+    // 1. Fill interior rows (top .. top + src_height)
+    for y in 0..src_height {
+        let dst_y = top + y;
+        let d_row = unsafe { dst_ptr.add(dst_y * dst_stride) };
+        let s_row = unsafe { src_ptr.add(y * src_stride) };
+
+        // Left border
+        if channels == 1 {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe { *d_row.add(px) = *s_row.add(sx_byte); }
+            }
+        } else if channels == 3 {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    let sp = s_row.add(sx_byte);
+                    let dp = d_row.add(px * 3);
+                    *dp = *sp;
+                    *dp.add(1) = *sp.add(1);
+                    *dp.add(2) = *sp.add(2);
+                }
+            }
+        } else {
+            for px in 0..left {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(s_row.add(sx_byte), d_row.add(px * channels), channels);
+                }
+            }
+        }
+
+        // Center copy
+        unsafe {
+            std::ptr::copy_nonoverlapping(s_row, d_row.add(left * channels), src_stride);
+        }
+
+        // Right border
+        if channels == 1 {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe { *d_row.add(px) = *s_row.add(sx_byte); }
+            }
+        } else if channels == 3 {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    let sp = s_row.add(sx_byte);
+                    let dp = d_row.add(px * 3);
+                    *dp = *sp;
+                    *dp.add(1) = *sp.add(1);
+                    *dp.add(2) = *sp.add(2);
+                }
+            }
+        } else {
+            for px in (left + src_width)..new_width {
+                let sx_byte = unsafe { *x_map.get_unchecked(px) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(s_row.add(sx_byte), d_row.add(px * channels), channels);
+                }
+            }
+        }
+    }
+
+    // 2. Fill top and bottom rows by row copy from filled interior
+    for dst_y in 0..top {
+        let oy = dst_y as i32 - top as i32;
+        let sy = map_coord(oy, ih);
+        let src_row_in_dst = unsafe { dst_ptr.add((top + sy) * dst_stride) };
+        let target_row = unsafe { dst_ptr.add(dst_y * dst_stride) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_row_in_dst, target_row, dst_stride);
+        }
+    }
+
+    for dst_y in (top + src_height)..new_height {
+        let oy = dst_y as i32 - top as i32;
+        let sy = map_coord(oy, ih);
+        let src_row_in_dst = unsafe { dst_ptr.add((top + sy) * dst_stride) };
+        let target_row = unsafe { dst_ptr.add(dst_y * dst_stride) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_row_in_dst, target_row, dst_stride);
+        }
+    }
+}
+
 /// Pad with edge replication (scalar)
 fn pad_replicate_scalar(
     dst: &mut [u8],
@@ -360,27 +497,7 @@ fn pad_replicate_scalar(
     left: usize,
     channels: usize,
 ) {
-    let iw = src_width as i32;
-    let ih = src_height as i32;
-    let pw = new_width as i32;
-    let ph = (dst.len() / (new_width * channels)) as i32;
-    let top_i = top as i32;
-    let left_i = left as i32;
-
-    for py in 0..ph {
-        for px in 0..pw {
-            // Map padded coordinates to original image coordinates
-            let src_x = (px - left_i).clamp(0, iw - 1);
-            let src_y = (py - top_i).clamp(0, ih - 1);
-
-            let src_idx = (src_y * iw + src_x) as usize * channels;
-            let dst_idx = (py * pw + px) as usize * channels;
-
-            for c in 0..channels {
-                dst[dst_idx + c] = src[src_idx + c];
-            }
-        }
-    }
+    pad_fast_slice(dst, src, new_width, src_width, src_height, top, left, channels, PadMode::Replicate);
 }
 
 /// Pad with wrap (tile) - scalar implementation
@@ -394,27 +511,7 @@ fn pad_wrap_scalar(
     left: usize,
     channels: usize,
 ) {
-    let iw = src_width as i32;
-    let ih = src_height as i32;
-    let pw = new_width as i32;
-    let ph = (dst.len() / (new_width * channels)) as i32;
-    let top_i = top as i32;
-    let left_i = left as i32;
-
-    for py in 0..ph {
-        for px in 0..pw {
-            // Map padded coordinates to original image coordinates using wrap (modulo)
-            let src_x = ((px - left_i).rem_euclid(iw)) as usize;
-            let src_y = ((py - top_i).rem_euclid(ih)) as usize;
-
-            let src_idx = (src_y * src_width + src_x) * channels;
-            let dst_idx = (py * pw + px) as usize * channels;
-
-            for c in 0..channels {
-                dst[dst_idx + c] = src[src_idx + c];
-            }
-        }
-    }
+    pad_fast_slice(dst, src, new_width, src_width, src_height, top, left, channels, PadMode::Wrap);
 }
 
 /// Pad with reflection (scalar - always available as fallback)
@@ -428,47 +525,7 @@ pub(crate) fn pad_reflect_scalar(
     left: usize,
     channels: usize,
 ) {
-    let iw = src_width as i32;
-    let ih = src_height as i32;
-    let pw = new_width as i32;
-    let ph = (dst.len() / (new_width * channels)) as i32;
-    let top_i = top as i32;
-    let left_i = left as i32;
-
-    for py in 0..ph {
-        for px in 0..pw {
-            // Map padded coordinates to original image coordinates with reflection
-            let ox = px - left_i;
-            let oy = py - top_i;
-
-            // Reflect coordinates
-            let mut src_x = if ox < 0 {
-                -ox - 1
-            } else if ox >= iw {
-                2 * iw - ox - 1
-            } else {
-                ox
-            };
-            let mut src_y = if oy < 0 {
-                -oy - 1
-            } else if oy >= ih {
-                2 * ih - oy - 1
-            } else {
-                oy
-            };
-
-            // Clamp to valid range (handle edge cases)
-            src_x = src_x.clamp(0, iw - 1);
-            src_y = src_y.clamp(0, ih - 1);
-
-            let src_idx = (src_y * iw + src_x) as usize * channels;
-            let dst_idx = (py * pw + px) as usize * channels;
-
-            for c in 0..channels {
-                dst[dst_idx + c] = src[src_idx + c];
-            }
-        }
-    }
+    pad_fast_slice(dst, src, new_width, src_width, src_height, top, left, channels, PadMode::Reflect);
 }
 
 #[cfg(test)]

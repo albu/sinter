@@ -108,6 +108,72 @@ impl Executable for HueSaturationValue {
             return None;
         }
 
+        if self.hue_shift == 0.0 && image.channels == 3 {
+            // Exact hexcone-model sat/val scaling (V = max), consistent with the
+            // hue-shift SIMD path. Previously this branch used a luma-weighted
+            // matrix (0.299/0.587/0.114) that disagreed with the hue path by up
+            // to ~50 for sat_scale 1.3 — same params, different result depending
+            // on whether hue_shift was 0.
+            let s = self.sat_scale;
+            let v = self.val_scale;
+            #[cfg(target_arch = "aarch64")]
+            {
+                if s <= 1.0 && v <= 1.0 {
+                    // No S/V clipping: closed-form RGB' = vs*ss*RGB + vs*(1-ss)*V
+                    // (V = max) is exact and fast (Q8.8).
+                    unsafe { neon::apply_satval_neon(image, s, v); }
+                } else {
+                    // ss > 1 or vs > 1 can clip S/V: use the exact hexcone path.
+                    unsafe { neon::apply_satval_neon_exact(image, s, v); }
+                }
+                return None;
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let data = &mut image.data;
+                if s <= 1.0 && v <= 1.0 {
+                    let m = s * v;
+                    let k = v * (1.0 - s);
+                    let mut i = 0;
+                    while i + 3 <= data.len() {
+                        let vmax = data[i].max(data[i + 1]).max(data[i + 2]) as f32;
+                        for c in 0..3 {
+                            let val = m * data[i + c] as f32 + k * vmax;
+                            data[i + c] = val.clamp(0.0, 255.0).round() as u8;
+                        }
+                        i += 3;
+                    }
+                } else {
+                    let mut i = 0;
+                    while i + 3 <= data.len() {
+                        let (r, g, b) = (data[i] as f32, data[i + 1] as f32, data[i + 2] as f32);
+                        let mm = r.max(g).max(b);
+                        let ll = r.min(g).min(b);
+                        let uu = r + g + b - mm - ll;
+                        let cc = mm - ll;
+                        let vp = (mm * v).clamp(0.0, 255.0);
+                        let cp = if mm > 0.0 { (vp * cc * s / mm).min(vp) } else { 0.0 };
+                        let xp = if cc > 0.0 { cp * (uu - ll) / cc } else { 0.0 };
+                        let mp = vp - cp;
+                        let vals = [r, g, b];
+                        for (c, &ch) in vals.iter().enumerate() {
+                            let out = if ch == mm {
+                                mp + cp
+                            } else if ch == ll {
+                                mp
+                            } else {
+                                mp + xp
+                            };
+                            data[i + c] = out.clamp(0.0, 255.0).round() as u8;
+                        }
+                        i += 3;
+                    }
+                }
+                return None;
+            }
+            return None;
+        }
+
         // Use SIMD implementation (with scalar fallback for non-RGB images)
         execute_fast_simd(self, image);
         None

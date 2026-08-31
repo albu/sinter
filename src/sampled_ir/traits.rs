@@ -16,7 +16,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Contrast { .. } => AccessPattern::InPlace,
             SampledImageOp::Gamma { .. } => AccessPattern::InPlace,
             SampledImageOp::Invert => AccessPattern::InPlace,
-            SampledImageOp::Normalize { .. } => AccessPattern::InPlace,
+            SampledImageOp::Normalize { .. } => AccessPattern::OutOfPlace, // allocates f32 output
             SampledImageOp::ToRGB => AccessPattern::OutOfPlace, // Changes channel count 1->3
             SampledImageOp::ToGray => AccessPattern::InPlace,
             SampledImageOp::ToSepia => AccessPattern::InPlace,
@@ -56,6 +56,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Affine { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Resize { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Crop { .. } => AccessPattern::OutOfPlace,
+            SampledImageOp::RandomCrop { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Pad { .. } => AccessPattern::OutOfPlace,
 
             // Kernel: OutOfPlace
@@ -106,6 +107,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Affine { .. } => ShapeEffect::Resize,
             SampledImageOp::Resize { .. } => ShapeEffect::Resize,
             SampledImageOp::Crop { .. } => ShapeEffect::Crop,
+            SampledImageOp::RandomCrop { .. } => ShapeEffect::Crop,
             SampledImageOp::Pad { .. } => ShapeEffect::Pad,
 
             // Kernel: Preserve
@@ -126,7 +128,8 @@ impl Transform for SampledImageOp {
             SampledImageOp::Contrast { .. } => ReorderRule::CommutesWithGeometry,
             SampledImageOp::Gamma { .. } => ReorderRule::CommutesWithGeometry,
             SampledImageOp::Invert => ReorderRule::CommutesWithGeometry,
-            SampledImageOp::Normalize { .. } => ReorderRule::CommutesWithGeometry,
+            // Normalize changes dtype (u8 -> f32): it must stay in place.
+            SampledImageOp::Normalize { .. } => ReorderRule::Barrier,
             SampledImageOp::ToRGB => ReorderRule::CommutesWithGeometry,
             SampledImageOp::ToGray => ReorderRule::CommutesWithGeometry,
             SampledImageOp::ToSepia => ReorderRule::CommutesWithGeometry,
@@ -238,14 +241,17 @@ impl Executable for SampledImageOp {
             }
 
             // Noise transforms
-            SampledImageOp::GaussNoise { mean, std } => GaussNoise::new(*mean, *std).execute(image),
-            SampledImageOp::MultiplicativeNoise { multiplier } => {
-                MultiplicativeNoise::new(*multiplier, 0.1).execute(image)
+            SampledImageOp::GaussNoise { mean, std, seed } => {
+                GaussNoise::with_seed(*mean, *std, *seed).execute(image)
+            }
+            SampledImageOp::MultiplicativeNoise { multiplier, seed } => {
+                MultiplicativeNoise::with_seed(*multiplier, 0.1, *seed).execute(image)
             }
             SampledImageOp::SaltAndPepper {
                 amount,
                 salt_vs_pepper,
-            } => SaltAndPepper::new(*amount, *salt_vs_pepper).execute(image),
+                seed,
+            } => SaltAndPepper::with_seed(*amount, *salt_vs_pepper, *seed).execute(image),
             SampledImageOp::NoiseGranularity {
                 mean,
                 std,
@@ -261,17 +267,24 @@ impl Executable for SampledImageOp {
             }
 
             // Dropout transforms
-            SampledImageOp::CoarseDropout { holes, hole_size } => CoarseDropout::new(
+            SampledImageOp::CoarseDropout {
+                holes,
+                hole_size,
+                seed,
+            } => CoarseDropout::with_seed(
                 *holes as u32,
                 (hole_size.0 as f32 / 255.0, hole_size.1 as f32 / 255.0),
                 0,
+                *seed,
             )
             .execute(image),
             SampledImageOp::GridDropout {
                 ratio,
                 unit_size,
                 holes: _,
-            } => GridDropout::new((*unit_size, *unit_size), *ratio, 0).execute(image),
+                seed,
+            } => GridDropout::with_seed((*unit_size, *unit_size), *ratio, 0, *seed)
+                .execute(image),
 
             // Geometric transforms
             SampledImageOp::HorizontalFlip => HorizontalFlip.execute(image),
@@ -312,6 +325,13 @@ impl Executable for SampledImageOp {
                 width,
                 height,
             } => Crop::new(*x, *y, *width, *height).execute(image),
+            SampledImageOp::RandomCrop {
+                width,
+                height,
+                fx,
+                fy,
+            } => crate::transforms::geometric::RandomCrop::new(*width, *height, *fx, *fy)
+                .execute(image),
             SampledImageOp::Pad {
                 top,
                 bottom,
@@ -341,7 +361,10 @@ impl Executable for SampledImageOp {
                 Pad::new(*top, *bottom, *left, *right, pad_mode).execute(image)
             }
             SampledImageOp::Affine {
-                matrix,
+                scale,
+                rotate,
+                translate,
+                shear,
                 interpolation,
                 border_mode,
             } => {
@@ -364,10 +387,10 @@ impl Executable for SampledImageOp {
                     crate::sampled_ir::ops::BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
                 let params = AffineParams {
-                    scale: (matrix[0].abs(), matrix[3].abs()),
-                    rotate: 0.0,
-                    translate: (matrix[4], matrix[5]),
-                    shear: (0.0, 0.0),
+                    scale: *scale,
+                    rotate: *rotate,
+                    translate: *translate,
+                    shear: *shear,
                 };
                 Affine::with_all(
                     params,
@@ -450,6 +473,7 @@ impl Executable for SampledImageOp {
 mod tests {
     use super::*;
     use crate::sampled_ir::ops::RotateAngle;
+    use crate::core::FusableImage;
 
     #[test]
     fn test_brightness_access_and_shape() {
@@ -483,6 +507,45 @@ mod tests {
     }
 
     #[test]
+    fn test_affine_identity_op_exact_path() {
+        // Exact path used by Python Compose.apply: SampledImageOp::Affine -> execute
+        use crate::sampled_ir::ops::{BorderMode, Interpolation};
+        let w = 8;
+        let h = 8;
+        let mut data = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x as u8).wrapping_mul(16).wrapping_add(y as u8));
+            }
+        }
+        let mut img = FusableImage::new(&mut data, w, h, 1);
+
+        let op = SampledImageOp::Affine {
+            scale: (1.0, 1.0),
+            rotate: 0.0,
+            translate: (0.0, 0.0),
+            shear: (0.0, 0.0),
+            interpolation: Interpolation::Bilinear,
+            border_mode: BorderMode::Constant { value: 0 },
+        };
+        let barrier = op.execute(&mut img).unwrap();
+
+        let mut mismatches = 0usize;
+        let mut max_diff = 0i32;
+        for (i, (&got, &expected)) in barrier.data.iter().zip(data.iter()).enumerate() {
+            let diff = (got as i32 - expected as i32).abs();
+            if diff > 0 {
+                mismatches += 1;
+                max_diff = max_diff.max(diff);
+                if mismatches <= 8 {
+                    eprintln!("  idx={} (x={}, y={}): got={} expected={}", i, i % w, i / w, got, expected);
+                }
+            }
+        }
+        assert_eq!(mismatches, 0, "SampledImageOp identity: {} mismatches, max_diff={}", mismatches, max_diff);
+    }
+
+    #[test]
     fn test_geometric_is_geometry() {
         let ops = vec![
             SampledImageOp::HorizontalFlip,
@@ -504,8 +567,9 @@ mod tests {
             SampledImageOp::GaussNoise {
                 mean: 0.0,
                 std: 1.0,
+                seed: 0,
             },
-            SampledImageOp::MultiplicativeNoise { multiplier: 1.0 },
+            SampledImageOp::MultiplicativeNoise { multiplier: 1.0, seed: 0 },
         ];
 
         for op in ops {

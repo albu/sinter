@@ -1,16 +1,9 @@
 // Sharpen transform
 //
-// Applies a sharpening convolution kernel to enhance edges.
-// When the `opencv` feature is enabled, uses OpenCV's optimized filter2D.
+// Applies a high-performance vectorized sharpening convolution kernel to enhance edges.
 
 use super::convolve::convolve_3x3;
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
-
-#[cfg(feature = "opencv")]
-use opencv::{
-    core::{Mat, MatTraitConst, CV_8U, CV_MAKETYPE},
-    imgproc,
-};
 
 /// Sharpen transform
 ///
@@ -76,26 +69,14 @@ impl Transform for Sharpen {
 
 impl Executable for Sharpen {
     fn execute(&self, image: &mut FusableImage) -> Option<crate::core::BarrierImage> {
-        #[cfg(feature = "opencv")]
-        {
-            match self.execute_opencv(image) {
-                Ok(_) => return None,
-                Err(e) => {
-                    eprintln!("OpenCV Sharpen failed: {}, using pure Rust fallback", e);
-                    self.execute_rust(image);
-                }
-            }
-        }
-        #[cfg(not(feature = "opencv"))]
-        {
-            self.execute_rust(image);
-        }
+        super::convolve_2d::apply_sharpen(image, self.strength);
         None
     }
 }
 
 impl Sharpen {
-    /// Pure Rust implementation (used as fallback or when opencv feature is disabled)
+    /// Pure Rust implementation (used as scalar fallback reference)
+    #[allow(dead_code)]
     fn execute_rust(&self, image: &mut FusableImage) {
         // Standard sharpen kernel
         //  0  -1   0
@@ -111,61 +92,6 @@ impl Sharpen {
         let kernel = [0, neighbor, 0, neighbor, center, neighbor, 0, neighbor, 0];
 
         convolve_3x3(image, &kernel, 1, 0);
-    }
-
-    /// OpenCV implementation with zero-copy data wrapping
-    #[cfg(feature = "opencv")]
-    fn execute_opencv(&self, image: &mut FusableImage) -> opencv::Result<()> {
-        let rows = image.height as i32;
-        let cols = image.width as i32;
-        let channels = image.channels as i32;
-        let cv_type = CV_MAKETYPE(CV_8U, channels);
-
-        // Standard sharpen kernel
-        //  0  -1   0
-        // -1   5  -1
-        //  0  -1   0
-        let s = self.strength;
-        let center = 1.0 + 4.0 * s;
-        let neighbor = -s;
-
-        let kernel_data = vec![
-            0.0f32, neighbor, 0.0, neighbor, center, neighbor, 0.0, neighbor, 0.0,
-        ];
-
-        unsafe {
-            let src_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                rows,
-                cols,
-                cv_type,
-                image.data.as_mut_ptr() as *mut std::ffi::c_void,
-            )?;
-            let mut dst_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                rows,
-                cols,
-                cv_type,
-                image.data.as_mut_ptr() as *mut std::ffi::c_void,
-            )?;
-
-            let kernel_mat = Mat::new_rows_cols_with_data_unsafe_def(
-                3,
-                3,
-                opencv::core::CV_32F,
-                kernel_data.as_ptr() as *mut std::ffi::c_void,
-            )?;
-
-            imgproc::filter_2d(
-                &src_mat,
-                &mut dst_mat,
-                -1, // Same depth as source
-                &kernel_mat,
-                opencv::core::Point::default(),
-                0.0,
-                opencv::core::BORDER_CONSTANT,
-            )?;
-        }
-
-        Ok(())
     }
 }
 

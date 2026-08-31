@@ -5,10 +5,12 @@
 mod mixup;
 mod cutmix;
 mod mosaic;
+pub mod parallel;
 
 pub use mixup::PyMixUp;
 pub use cutmix::PyCutMix;
 pub use mosaic::PyMosaic;
+pub use parallel::parallel_apply_batch;
 
 use crate::batch::{Batch, BatchPipeline, MixUp, CutMix, Mosaic};
 use crate::batch::label::SoftLabel;

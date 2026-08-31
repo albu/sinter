@@ -1,15 +1,14 @@
 #!/bin/bash
 set -e
 
-# Configuration
-IMAGE_NAME="sinter-bench"
-DOCKERFILE="Dockerfile.benchmark"
+# Runs the benchmark suite with the local Python environment (no Docker).
+# Requires the `sinter` release module built into the active interpreter:
+#   maturin develop --release --features python
 
-echo "🚀 Building benchmark container..."
-docker build -t $IMAGE_NAME -f $DOCKERFILE .
+PYTHON="${PYTHON:-python3}"
 
-echo "🔥 Running individual benchmarks..."
-docker run --rm $IMAGE_NAME python/benchmarks/benchmark_unfair_individual.py
+echo "🚀 Running individual benchmarks..."
+"$PYTHON" python/benchmarks/benchmark_individual.py
 
-echo "📊 Running fair comparison benchmarks..."
-docker run --rm $IMAGE_NAME python/benchmarks/benchmark_fair_v1_v2.py
+echo "📊 Running fusion benchmarks..."
+"$PYTHON" python/benchmarks/benchmark_fusion.py

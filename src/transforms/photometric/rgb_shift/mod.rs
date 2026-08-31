@@ -101,7 +101,9 @@ impl Executable for RGBShift {
             // RGB image - use NEON SIMD for speed
             #[cfg(target_arch = "aarch64")]
             {
-                let (r_shift, g_shift, b_shift) = self.get_i8_shifts();
+                let r_shift = self.r_shift.round() as i16;
+                let g_shift = self.g_shift.round() as i16;
+                let b_shift = self.b_shift.round() as i16;
                 unsafe {
                     neon::rgb_shift_neon(&mut image.data, r_shift, g_shift, b_shift);
                 }
@@ -261,5 +263,27 @@ mod tests {
             assert_eq!(img.data[i * 3 + 1], 120);
             assert_eq!(img.data[i * 3 + 2], 130);
         }
+    }
+
+    #[test]
+    fn test_rgb_shift_8pixels_negative() {
+        let mut data = vec![100u8; 24];
+        let mut img = FusableImage::new(&mut data, 8, 1, 3);
+        let shift = RGBShift::new(-10.0, -20.0, -30.0);
+        shift.execute(&mut img);
+        assert_eq!(img.data[0], 90);
+        assert_eq!(img.data[1], 80);
+        assert_eq!(img.data[2], 70);
+    }
+
+    #[test]
+    fn test_rgb_shift_8pixels_underflow() {
+        let mut data = vec![6u8, 1, 19].repeat(8);
+        let mut img = FusableImage::new(&mut data, 8, 1, 3);
+        let shift = RGBShift::new(10.0, -20.0, 30.0);
+        shift.execute(&mut img);
+        assert_eq!(img.data[0], 16);
+        assert_eq!(img.data[1], 0);
+        assert_eq!(img.data[2], 49);
     }
 }

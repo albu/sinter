@@ -84,7 +84,7 @@ Rotate90 + HorizontalFlip → Transpose
 
 | Transform | Fusable | Description |
 |-----------|---------|-------------|
-| **GaussianBlur** | ❌ | Gaussian blur (optionally OpenCV) |
+| **GaussianBlur** | ❌ | Gaussian blur (pure SIMD) |
 | **MedianBlur** | ❌ | Median blur |
 | **Sharpen** | ❌ | Sharpen kernel |
 | **Emboss** | ❌ | Emboss effect |
@@ -131,10 +131,11 @@ Rotate90 + HorizontalFlip → Transpose
 
 ### Pre-bound Kernels (⚡)
 
-Transforms with ⚡ icon use pre-bound function pointers for 8-10x speedup:
+Transforms with ⚡ icon use pre-bound function pointers to avoid dynamic dispatch:
 - Avoids dynamic dispatch overhead
 - Set during optimization phase
 - Falls back to macro dispatch if not available
+- Measured fusion speedups range ~1.6-17x vs albumentations (see README Benchmarks)
 
 ### Zero-Copy Execution
 

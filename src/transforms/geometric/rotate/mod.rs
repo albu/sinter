@@ -144,7 +144,9 @@ impl Executable for Rotate {
         };
 
         let channels = image.channels;
-        let mut rotated_data = vec![0u8; (new_width * new_height * channels) as usize];
+        let total_bytes = new_width * new_height * channels;
+        let mut rotated_data = Vec::<u8>::with_capacity(total_bytes);
+        unsafe { rotated_data.set_len(total_bytes); }
 
         match self.angle {
             RotateAngle::Rotate90 => {
@@ -177,25 +179,92 @@ impl Executable for Rotate {
                 }
             }
             RotateAngle::Rotate180 => {
-                // Rotate 180°: copy then reverse pixel order (not byte order)
-                // Use swap_nonoverlapping for efficient whole-pixel swaps
-                rotated_data.copy_from_slice(&image.data);
-
-                let pixel_count = rotated_data.len() / channels;
-                let ptr = rotated_data.as_mut_ptr();
-                let mut left = 0;
-                let mut right = pixel_count - 1;
-
-                while left < right {
+                // Rotate 180°: reverse pixel order
+                if channels == 1 {
+                    let src_ptr = image.data.as_ptr();
+                    let dst_ptr = rotated_data.as_mut_ptr();
+                    let n = total_bytes;
+                    
+                    let mut i = 0;
+                    #[cfg(target_arch = "aarch64")]
                     unsafe {
-                        std::ptr::swap_nonoverlapping(
-                            ptr.add(left * channels),
-                            ptr.add(right * channels),
-                            channels,
-                        );
+                        while i + 16 <= n {
+                            let chunk = std::arch::aarch64::vld1q_u8(src_ptr.add(n - i - 16));
+                            let rev64 = std::arch::aarch64::vrev64q_u8(chunk);
+                            let rev = std::arch::aarch64::vcombine_u8(
+                                std::arch::aarch64::vget_high_u8(rev64),
+                                std::arch::aarch64::vget_low_u8(rev64),
+                            );
+                            std::arch::aarch64::vst1q_u8(dst_ptr.add(i), rev);
+                            i += 16;
+                        }
                     }
-                    left += 1;
-                    right -= 1;
+                    while i < n {
+                        unsafe {
+                            *dst_ptr.add(i) = *src_ptr.add(n - 1 - i);
+                        }
+                        i += 1;
+                    }
+                } else if channels == 3 {
+                    let pixel_count = total_bytes / 3;
+                    let src_ptr = image.data.as_ptr();
+                    let dst_ptr = rotated_data.as_mut_ptr();
+
+                    let mut i = 0;
+                    #[cfg(target_arch = "aarch64")]
+                    unsafe {
+                        while i + 16 <= pixel_count {
+                            let src_off = (pixel_count - i - 16) * 3;
+                            let rgb = std::arch::aarch64::vld3q_u8(src_ptr.add(src_off));
+                            let r = std::arch::aarch64::vrev64q_u8(rgb.0);
+                            let g = std::arch::aarch64::vrev64q_u8(rgb.1);
+                            let b = std::arch::aarch64::vrev64q_u8(rgb.2);
+                            let r_rev = std::arch::aarch64::vcombine_u8(
+                                std::arch::aarch64::vget_high_u8(r),
+                                std::arch::aarch64::vget_low_u8(r),
+                            );
+                            let g_rev = std::arch::aarch64::vcombine_u8(
+                                std::arch::aarch64::vget_high_u8(g),
+                                std::arch::aarch64::vget_low_u8(g),
+                            );
+                            let b_rev = std::arch::aarch64::vcombine_u8(
+                                std::arch::aarch64::vget_high_u8(b),
+                                std::arch::aarch64::vget_low_u8(b),
+                            );
+                            std::arch::aarch64::vst3q_u8(
+                                dst_ptr.add(i * 3),
+                                std::arch::aarch64::uint8x16x3_t(r_rev, g_rev, b_rev),
+                            );
+                            i += 16;
+                        }
+                    }
+                    while i < pixel_count {
+                        let src_idx = (pixel_count - 1 - i) * 3;
+                        let dst_idx = i * 3;
+                        unsafe {
+                            *dst_ptr.add(dst_idx) = *src_ptr.add(src_idx);
+                            *dst_ptr.add(dst_idx + 1) = *src_ptr.add(src_idx + 1);
+                            *dst_ptr.add(dst_idx + 2) = *src_ptr.add(src_idx + 2);
+                        }
+                        i += 1;
+                    }
+                } else {
+                    rotated_data.copy_from_slice(&image.data);
+                    let pixel_count = rotated_data.len() / channels;
+                    let ptr = rotated_data.as_mut_ptr();
+                    let mut left = 0;
+                    let mut right = pixel_count - 1;
+                    while left < right {
+                        unsafe {
+                            std::ptr::swap_nonoverlapping(
+                                ptr.add(left * channels),
+                                ptr.add(right * channels),
+                                channels,
+                            );
+                        }
+                        left += 1;
+                        right -= 1;
+                    }
                 }
             }
             RotateAngle::Rotate270 => {

@@ -32,10 +32,8 @@ pub fn try_as_lut_op(transform: &dyn Transform) -> Option<Box<dyn LutOp>> {
         return Some(Box::new(c.clone()));
     }
 
-    // Try Normalize
-    if let Some(n) = transform.as_any().downcast_ref::<Normalize>() {
-        return Some(Box::new(n.clone()));
-    }
+    // Normalize is NOT a LUT op: it produces float32 output (terminal barrier)
+    // and must never fuse into a u8 LUT chain.
 
     // Try Invert
     if let Some(i) = transform.as_any().downcast_ref::<Invert>() {
@@ -79,11 +77,7 @@ fn try_sampled_as_lut_op(sampled: &SampledImageOp) -> Option<Box<dyn LutOp>> {
         SampledImageOp::Contrast { factor } => Some(Box::new(Contrast::new(*factor))),
         SampledImageOp::Gamma { gamma } => Some(Box::new(Gamma::new(*gamma))),
         SampledImageOp::Invert => Some(Box::new(Invert)),
-        SampledImageOp::Normalize { mean, std } => {
-            // SampledImageOp has [f32; 3] but Normalize::new uses f32
-            // Use mean[0] and std[0] (unified API uses single value)
-            Some(Box::new(Normalize::new(mean[0], std[0])))
-        }
+        // Normalize: NOT LUT-fusable (float32 terminal barrier)
         SampledImageOp::Posterize { bits } => Some(Box::new(Posterize::new(*bits))),
         SampledImageOp::Solarize { threshold } => Some(Box::new(Solarize::new(*threshold))),
         _ => None,
@@ -194,7 +188,13 @@ fn try_sampled_as_matrix_op(
             // tint is [f32; 4] = [target_r, target_g, target_b, intensity]
             Some(Box::new(ColorTint::new(tint[0], tint[1], tint[2], tint[3])))
         }
-        // HueSaturationValue does NOT implement MatrixOp, so we skip it here
+        // HueSaturationValue with hue_shift == 0 is intentionally NOT converted
+        // to a matrix here: the exact sat/val transform is
+        //   RGB' = vs*ss*RGB + vs*(1-ss)*V*[1,1,1]  (V = max)
+        // which has a per-pixel max term (plus an S/V clip for ss>1 or vs>1),
+        // so it is not a linear map and cannot be matrix-fused without
+        // changing results. The old luma-weighted approximation (0.299/0.587/
+        // 0.114) disagreed with the hue-shift path by up to ~50 and was removed.
         _ => None,
     }
 }

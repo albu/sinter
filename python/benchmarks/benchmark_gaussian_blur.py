@@ -19,6 +19,7 @@ from sinter import GaussianBlur as SinterGaussianBlur, Compose
 
 WARMUP_RUNS = 3
 BENCHMARK_RUNS = 30
+BENCHMARK_BATCHES = 5
 
 # Test different image sizes
 IMAGE_SIZES = [
@@ -33,15 +34,44 @@ IMAGE_SIZES = [
 KERNEL_SIZES = [3, 5, 7, 13, 21, 31]
 
 # Map kernel sizes to equivalent OpenCV sigma values
-# These match the Pascal binomial kernels' effective sigma
+# For ksize 3/5/7 pass sigma=0: cv2's small_gaussian_tab for these sizes is
+# EXACTLY the Pascal binomial kernel ([1,2,1]/4 etc.) — the identical filter —
+# and sigma=0 selects cv2's optimized fixed-point engine. Passing an explicit
+# sigma instead makes cv2 build a float kernel and run its general (much
+# slower) engine, which understates the cv2 baseline.
+# For multi-pass sizes (13/21/31) there is no single-pass cv2 equivalent, so
+# keep an explicit sigma mapped to the total effective blur.
 SIGMA_MAP = {
-    3: 0.85,   # [1,2,1] Pascal
-    5: 1.08,   # [1,4,6,4,1] Pascal
-    7: 1.28,   # [1,6,15,20,15,6,1] Pascal
+    3: 0,      # cv2 small_gaussian_tab = [1,2,1]/4 (identical filter)
+    5: 0,      # cv2 small_gaussian_tab = [1,4,6,4,1]/16
+    7: 0,      # cv2 small_gaussian_tab = [2,7,14,18,14,7,2]/64
     13: 1.70,  # 2×7×7 multi-pass (variance addition)
     21: 2.08,  # 3×7×7 multi-pass
     31: 2.68,  # 5×7×7 multi-pass
 }
+
+
+def timeit_min(fn, img, runs, batches=BENCHMARK_BATCHES, warmup=WARMUP_RUNS):
+    """Min-of-batches timing; passes the SAME input to both sides, op-only.
+
+    Sinter's GaussianBlur is IN-PLACE (verified at runtime: apply() returns the
+    same buffer and mutates its input); cv2's is out-of-place. The sinter side
+    therefore re-blurs already-blurred data across iterations. This is safe for
+    timing: the blur is branchless with fixed memory traffic, so its cost does
+    not depend on pixel values — but do NOT extend this raw-input pattern to
+    ops with data-dependent timing. No harness-level input copy on either side
+    (the old asymmetry where sinter paid img.copy() and cv2 did not is gone).
+    """
+    for _ in range(warmup):
+        fn(img)
+    best = float("inf")
+    for _ in range(batches):
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn(img)
+        batch = (time.perf_counter() - start) / runs * 1000
+        best = min(best, batch)
+    return best
 
 
 def benchmark_single(image_size, kernel_size):
@@ -54,26 +84,18 @@ def benchmark_single(image_size, kernel_size):
     # Sinter GaussianBlur (our implementation)
     sinter_pipe = Compose([SinterGaussianBlur(kernel_size=kernel_size)])
 
-    for _ in range(WARMUP_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-
-    start = time.perf_counter()
-    for _ in range(BENCHMARK_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-    sinter_time = (time.perf_counter() - start) / BENCHMARK_RUNS * 1000
+    sinter_time = timeit_min(sinter_pipe.apply, img, BENCHMARK_RUNS)
 
     # OpenCV GaussianBlur (for comparison)
     cv_time = None
     if HAS_CV2:
         sigma = SIGMA_MAP.get(kernel_size)  # Must match Pascal kernel sigma
 
-        for _ in range(WARMUP_RUNS):
-            _ = cv2.GaussianBlur(img, (kernel_size, kernel_size), sigma)
-
-        start = time.perf_counter()
-        for _ in range(BENCHMARK_RUNS):
-            _ = cv2.GaussianBlur(img, (kernel_size, kernel_size), sigma)
-        cv_time = (time.perf_counter() - start) / BENCHMARK_RUNS * 1000
+        cv_time = timeit_min(
+            lambda x: cv2.GaussianBlur(x, (kernel_size, kernel_size), sigma),
+            img,
+            BENCHMARK_RUNS,
+        )
 
     return cv_time, sinter_time
 

@@ -26,6 +26,8 @@ use crate::core::{AccessPattern, BarrierImage, Executable, FusableImage, ShapeEf
 pub struct SaltAndPepper {
     pub amount: f32,
     pub salt_ratio: f32,
+    /// Per-pipeline seed so different images get different noise.
+    pub seed: u64,
 }
 
 impl SaltAndPepper {
@@ -36,6 +38,16 @@ impl SaltAndPepper {
     /// - amount is outside [0.0, 1.0]
     /// - salt_ratio is outside [0.0, 1.0]
     pub fn new(amount: f32, salt_ratio: f32) -> Self {
+        Self::with_seed(amount, salt_ratio, 0)
+    }
+
+    /// Create a new SaltAndPepper transform with an explicit per-pipeline seed.
+    ///
+    /// # Panics
+    /// Panics if:
+    /// - amount is outside [0.0, 1.0]
+    /// - salt_ratio is outside [0.0, 1.0]
+    pub fn with_seed(amount: f32, salt_ratio: f32, seed: u64) -> Self {
         assert!(
             (0.0..=1.0).contains(&amount),
             "amount must be in [0.0, 1.0], got {}",
@@ -46,13 +58,17 @@ impl SaltAndPepper {
             "salt_ratio must be in [0.0, 1.0], got {}",
             salt_ratio
         );
-        Self { amount, salt_ratio }
+        Self {
+            amount,
+            salt_ratio,
+            seed,
+        }
     }
 
     /// Simple hash function for reproducible pseudo-randomness
     #[inline]
-    fn hash(&self, index: usize) -> f32 {
-        let mut state = index as u64;
+    fn hash(&self, index: usize, seed: u64) -> f32 {
+        let mut state = (index as u64).wrapping_add(seed);
         // Simple mixing function
         state = state.wrapping_mul(0x517cc1b727220a95);
         state ^= state >> 33;
@@ -87,14 +103,13 @@ impl Executable for SaltAndPepper {
 
         for (i, px) in image.data.iter_mut().enumerate() {
             // First check if this pixel should be affected
-            let r1 = self.hash(i);
+            let r1 = self.hash(i, self.seed);
             if r1 < self.amount {
                 // Pixel is affected - decide salt or pepper
-                let r2 = self.hash(i + total_pixels);
+                let r2 = self.hash(i + total_pixels, self.seed);
                 *px = if r2 < self.salt_ratio { 255 } else { 0 };
             }
         }
-
         None
     }
 }

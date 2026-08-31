@@ -124,7 +124,8 @@ impl Resize {
 
         // Allocate new buffer
         let new_size = self.new_width * self.new_height * channels;
-        let mut new_data = vec![0u8; new_size];
+        let mut new_data = Vec::with_capacity(new_size);
+        unsafe { new_data.set_len(new_size); }
 
         // Use platform-optimized path
         #[cfg(target_arch = "aarch64")]
@@ -147,9 +148,11 @@ impl Resize {
             match self.interpolation {
                 ResizeInterpolation::Nearest => {
                     for dy in 0..self.new_height {
+                        let sy = (dy * old_height) / self.new_height;
+                        let sy = sy.min(old_height - 1);
                         for dx in 0..self.new_width {
-                            let sx = (dx * old_width + self.new_width / 2) / self.new_width;
-                            let sy = (dy * old_height + self.new_height / 2) / self.new_height;
+                            let sx = (dx * old_width) / self.new_width;
+                            let sx = sx.min(old_width - 1);
                             let src_idx = (sy * old_width + sx) * channels;
                             let dst_idx = (dy * self.new_width + dx) * channels;
                             for c in 0..channels {
@@ -158,77 +161,37 @@ impl Resize {
                         }
                     }
                 }
-                ResizeInterpolation::Bilinear => {
+                ResizeInterpolation::Bilinear
+                | ResizeInterpolation::Bicubic
+                | ResizeInterpolation::Lanczos4 => {
+                    let x_scale = old_width as f32 / self.new_width as f32;
+                    let y_scale = old_height as f32 / self.new_height as f32;
+
                     for dy in 0..self.new_height {
+                        let y_src = (dy as f32 + 0.5) * y_scale - 0.5;
+                        let y0_f = y_src.floor();
+                        let y0 = if y_src < 0.0 { 0 } else { (y0_f as usize).min(old_height - 1) };
+                        let y1 = (y0 + 1).min(old_height - 1);
+                        let fy = if y_src < 0.0 || y_src >= (old_height - 1) as f32 { 0.0 } else { y_src - y0_f };
+
                         for dx in 0..self.new_width {
-                            let sx_f = (dx as f32 * old_width as f32) / self.new_width as f32;
-                            let sy_f = (dy as f32 * old_height as f32) / self.new_height as f32;
-                            let sx = sx_f.floor() as usize;
-                            let sy = sy_f.floor() as usize;
-                            let fx = sx_f - sx as f32;
-                            let fy = sy_f - sy as f32;
+                            let x_src = (dx as f32 + 0.5) * x_scale - 0.5;
+                            let x0_f = x_src.floor();
+                            let x0 = if x_src < 0.0 { 0 } else { (x0_f as usize).min(old_width - 1) };
+                            let x1 = (x0 + 1).min(old_width - 1);
+                            let fx = if x_src < 0.0 || x_src >= (old_width - 1) as f32 { 0.0 } else { x_src - x0_f };
 
                             for c in 0..channels {
-                                let i00 = image.data[((sy * old_width + sx) * channels) + c] as f32;
-                                let i10 = if sx + 1 < old_width {
-                                    image.data[((sy * old_width + sx + 1) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
-                                let i01 = if sy + 1 < old_height {
-                                    image.data[((((sy + 1) * old_width) + sx) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
-                                let i11 = if sx + 1 < old_width && sy + 1 < old_height {
-                                    image.data[((((sy + 1) * old_width) + sx + 1) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
+                                let i00 = image.data[((y0 * old_width + x0) * channels) + c] as f32;
+                                let i10 = image.data[((y0 * old_width + x1) * channels) + c] as f32;
+                                let i01 = image.data[((y1 * old_width + x0) * channels) + c] as f32;
+                                let i11 = image.data[((y1 * old_width + x1) * channels) + c] as f32;
 
                                 let val = i00 * (1.0 - fx) * (1.0 - fy)
                                     + i10 * fx * (1.0 - fy)
                                     + i01 * (1.0 - fx) * fy
                                     + i11 * fx * fy;
-                                new_data[(dy * self.new_width + dx) * channels + c] = val.clamp(0.0, 255.0) as u8;
-                            }
-                        }
-                    }
-                }
-                ResizeInterpolation::Bicubic | ResizeInterpolation::Lanczos4 => {
-                    // Fall back to bilinear for now
-                    for dy in 0..self.new_height {
-                        for dx in 0..self.new_width {
-                            let sx_f = (dx as f32 * old_width as f32) / self.new_width as f32;
-                            let sy_f = (dy as f32 * old_height as f32) / self.new_height as f32;
-                            let sx = sx_f.floor() as usize;
-                            let sy = sy_f.floor() as usize;
-                            let fx = sx_f - sx as f32;
-                            let fy = sy_f - sy as f32;
-
-                            for c in 0..channels {
-                                let i00 = image.data[((sy * old_width + sx) * channels) + c] as f32;
-                                let i10 = if sx + 1 < old_width {
-                                    image.data[((sy * old_width + sx + 1) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
-                                let i01 = if sy + 1 < old_height {
-                                    image.data[((((sy + 1) * old_width) + sx) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
-                                let i11 = if sx + 1 < old_width && sy + 1 < old_height {
-                                    image.data[((((sy + 1) * old_width) + sx + 1) * channels) + c] as f32
-                                } else {
-                                    i00
-                                };
-
-                                let val = i00 * (1.0 - fx) * (1.0 - fy)
-                                    + i10 * fx * (1.0 - fy)
-                                    + i01 * (1.0 - fx) * fy
-                                    + i11 * fx * fy;
-                                new_data[(dy * self.new_width + dx) * channels + c] = val.clamp(0.0, 255.0) as u8;
+                                new_data[(dy * self.new_width + dx) * channels + c] = (val.round() as i32).clamp(0, 255) as u8;
                             }
                         }
                     }
@@ -238,6 +201,7 @@ impl Resize {
 
         BarrierImage {
             data: new_data,
+            f32_data: None,
             width: self.new_width,
             height: self.new_height,
             channels,

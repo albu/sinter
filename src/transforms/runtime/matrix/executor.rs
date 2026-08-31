@@ -42,9 +42,6 @@ impl MatrixExecutor {
             let m1_vec = [vdupq_n_s16(m10), vdupq_n_s16(m11), vdupq_n_s16(m12)];
             let m2_vec = [vdupq_n_s16(m20), vdupq_n_s16(m21), vdupq_n_s16(m22)];
 
-            // Use temporary buffer for storing results
-            let mut temp_buf: [u8; 48] = [0; 48];
-
             let mut offset = 0;
 
             // Process 16 pixels (48 bytes) at a time
@@ -287,22 +284,9 @@ impl MatrixExecutor {
                 let g_out = vcombine_u8(g_out_lo_u8, g_out_hi_u8);
                 let b_out = vcombine_u8(b_out_lo_u8, b_out_hi_u8);
 
-                // Store channels separately to temp buffer (avoid vst3q_u8 issues)
-                // Layout: R0-R15, G0-G15, B0-B15 (all de-interleaved)
-                let r_ptr = temp_buf.as_mut_ptr();
-                let g_ptr = temp_buf.as_mut_ptr().add(16);
-                let b_ptr = temp_buf.as_mut_ptr().add(32);
-                vst1q_u8(r_ptr, r_out);
-                vst1q_u8(g_ptr, g_out);
-                vst1q_u8(b_ptr, b_out);
-
-                // Manually interleave RGB back to data
+                // Interleave RGB and store directly to memory
                 let dst = data.as_mut_ptr().add(offset);
-                for i in 0..16 {
-                    *dst.add(i * 3 + 0) = temp_buf[i]; // R
-                    *dst.add(i * 3 + 1) = temp_buf[i + 16]; // G
-                    *dst.add(i * 3 + 2) = temp_buf[i + 32]; // B
-                }
+                vst3q_u8(dst, uint8x16x3_t(r_out, g_out, b_out));
 
                 offset += 48;
             }

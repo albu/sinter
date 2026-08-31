@@ -1,6 +1,9 @@
 // Rust implementation of HueSaturationValue transform
 //
 // Pure Rust scalar implementation using integer arithmetic.
+//
+// Note: Reference implementation used for test verification and fallback.
+#![allow(dead_code)]
 
 use crate::core::FusableImage;
 use crate::transforms::photometric::hue_saturation_value::HueSaturationValue;

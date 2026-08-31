@@ -5,7 +5,21 @@ import pytest
 # Try to import sinter, skip if not available
 pytest.importorskip("sinter")
 
-from sinter import Compose, HorizontalFlip, Resize
+from sinter import (
+    Compose,
+    HorizontalFlip,
+    Resize,
+    Brightness,
+    Contrast,
+    Gamma,
+    Solarize,
+    Posterize,
+    ToSepia,
+    ColorTemperature,
+    HueSaturationValue,
+    ColorTint,
+    VerticalFlip,
+)
 
 class TestComposeUnified:
     """Test the Unified Compose.__call__ API."""
@@ -177,6 +191,59 @@ class TestComposeUnified:
 
         # Mask flipped
         assert np.all(result["masks"][20:60, 50:90] == 1)
+
+    def test_long_pipeline_deterministic_and_bounded(self):
+        """A long mixed pipeline (LUT + matrix + geometric) must be
+        deterministic for a fixed seed, keep shape/dtype, and stay within a
+        documented bound of sequential per-op application."""
+        pipeline = Compose(
+            [
+                Brightness(delta=20),
+                Contrast(factor=1.2),
+                Gamma(gamma=0.9),
+                Solarize(threshold=128),
+                Posterize(bits=4),
+                ToSepia(),
+                ColorTemperature(temperature=50),
+                HueSaturationValue(hue_shift=0, saturation_scale=1.3, value_scale=1.0),
+                ColorTint(tint=(255, 200, 100, 0.5)),
+                HorizontalFlip(),
+                VerticalFlip(),
+            ]
+        )
+        rng = np.random.default_rng(1234)
+        img = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+
+        a = pipeline.apply(img.copy())
+        b = pipeline.apply(img.copy())
+        # Deterministic for the same seed is not guaranteed via apply (random
+        # seed each call), so use sample_with_seed for reproducibility.
+        s1 = pipeline.sample_with_seed(7).apply(img.copy())
+        s2 = pipeline.sample_with_seed(7).apply(img.copy())
+        np.testing.assert_array_equal(s1, s2)
+
+        assert s1.shape == img.shape and s1.dtype == np.uint8
+
+        # Bounded divergence vs sequential application (matrix fusion clamps
+        # once instead of per-op; LUT/geometric fusion are exact).
+        seq = img.copy()
+        ops_seq = [
+            Brightness(delta=20),
+            Contrast(factor=1.2),
+            Gamma(gamma=0.9),
+            Solarize(threshold=128),
+            Posterize(bits=4),
+            ToSepia(),
+            ColorTemperature(temperature=50),
+            HueSaturationValue(hue_shift=0, saturation_scale=1.3, value_scale=1.0),
+            ColorTint(tint=(255, 200, 100, 0.5)),
+            HorizontalFlip(),
+            VerticalFlip(),
+        ]
+        for op in ops_seq:
+            seq = Compose([op]).apply(seq)
+        max_diff = int(np.abs(s1.astype(int) - seq.astype(int)).max())
+        assert max_diff <= 32, f"long pipeline divergence exceeded bound: {max_diff}"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

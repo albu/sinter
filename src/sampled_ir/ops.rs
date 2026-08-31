@@ -6,6 +6,61 @@
 use crate::core::{AccessPattern, ShapeEffect};
 use serde::{Deserialize, Serialize};
 
+/// Reconstruct core `AffineParams` from the sampled inverse-mapping matrix.
+///
+/// The sampled matrix is `[a, b, c, d, e, f]` describing the INVERSE mapping
+/// used for backward resampling:
+///
+/// ```text
+/// x_in = a*x_out + b*y_out + c
+/// y_in = d*x_out + e*y_out + f
+/// ```
+///
+/// The core `Affine` stores FORWARD parameters (scale, rotate, translate) and
+/// rebuilds the inverse matrix itself. To round-trip exactly we invert the
+/// linear part `A = [[a, b], [d, e]]` and extract scale / rotation / translation
+/// using the same conventions as `build_inverse_matrix` (forward
+/// `F = [[sx*cos, -sy*sin], [sx*sin, sy*cos]]`, translation applied as
+/// `c = -(a*tx + d*ty)`, `f = -(b*tx + e*ty)`).
+pub(crate) fn affine_params_from_matrix(
+    matrix: [f32; 6],
+) -> crate::transforms::geometric::affine::AffineParams {
+    let a = matrix[0];
+    let b = matrix[1];
+    let c = matrix[2];
+    let d = matrix[3];
+    let e = matrix[4];
+    let f = matrix[5];
+
+    let det = a * e - b * d;
+    if det.abs() < 1e-9 {
+        // Degenerate (singular) matrix: fall back to identity-like parameters.
+        return crate::transforms::geometric::affine::AffineParams::default();
+    }
+
+    // Forward linear map F = A^-1.
+    let fwd_a = e / det;
+    let fwd_b = -b / det;
+    let fwd_d = -d / det;
+    let fwd_e = a / det;
+
+    // Core forward convention: [[sx*cos, -sy*sin], [sx*sin, sy*cos]].
+    let sx = (fwd_a * fwd_a + fwd_d * fwd_d).sqrt();
+    let sy = (fwd_b * fwd_b + fwd_e * fwd_e).sqrt();
+    let rotate = fwd_d.atan2(fwd_a).to_degrees();
+
+    // Recover forward translation by inverting c = -(a*tx + d*ty), f = -(b*tx + e*ty).
+    let tx = (-c * e + d * f) / det;
+    let ty = (-a * f + c * b) / det;
+
+    crate::transforms::geometric::affine::AffineParams {
+        scale: (sx, sy),
+        rotate,
+        translate: (tx, ty),
+        shear: (0.0, 0.0),
+    }
+}
+
 /// Deterministic image transform (sampled, no randomness)
 ///
 /// This enum represents a SINGLE transform with ALL parameters
@@ -120,15 +175,16 @@ pub enum SampledImageOp {
     },
 
     /// Add Gaussian noise to pixels
-    GaussNoise { mean: f32, std: f32 },
+    GaussNoise { mean: f32, std: f32, seed: u64 },
 
     /// Add multiplicative noise: `pixel = pixel * (1 + noise)`
-    MultiplicativeNoise { multiplier: f32 },
+    MultiplicativeNoise { multiplier: f32, seed: u64 },
 
     /// Salt-and-pepper noise
     SaltAndPepper {
         amount: f32,         // Fraction of pixels to affect
         salt_vs_pepper: f32, // 0.0 = all pepper, 1.0 = all salt
+        seed: u64,
     },
 
     /// Noise with spatial granularity (per-region noise)
@@ -142,6 +198,7 @@ pub enum SampledImageOp {
     CoarseDropout {
         holes: usize,          // Number of holes
         hole_size: (u32, u32), // (height, width) range
+        seed: u64,
     },
 
     /// Grid-based dropout
@@ -149,6 +206,7 @@ pub enum SampledImageOp {
         ratio: f32,     // Fraction of grid to drop
         unit_size: u32, // Size of grid cells
         holes: usize,   // Number of holes
+        seed: u64,
     },
 
     // ========================================================================
@@ -168,7 +226,10 @@ pub enum SampledImageOp {
 
     /// Affine transformation
     Affine {
-        matrix: [f32; 6], // [a, b, c, d, e, f] for affine transform
+        scale: (f32, f32),
+        rotate: f32,
+        translate: (f32, f32),
+        shear: (f32, f32),
         interpolation: Interpolation,
         border_mode: BorderMode,
     },
@@ -186,6 +247,17 @@ pub enum SampledImageOp {
         y: u32,
         width: u32,
         height: u32,
+    },
+
+    /// Crop a fixed-size window at a sampled fractional position.
+    /// Anchors (fx, fy in [0, 1)) resolve against the actual image size at
+    /// execution time, so one sampled program fits any image size while
+    /// image and label transforms agree exactly.
+    RandomCrop {
+        width: u32,
+        height: u32,
+        fx: f32,
+        fy: f32,
     },
 
     /// Pad image
@@ -338,6 +410,14 @@ impl SampledImageOp {
                 width,
                 height,
             } => Some(Box::new(Crop::new(*x, *y, *width, *height))),
+            SampledImageOp::RandomCrop {
+                width,
+                height,
+                fx,
+                fy,
+            } => Some(Box::new(crate::transforms::geometric::RandomCrop::new(
+                *width, *height, *fx, *fy,
+            ))),
             SampledImageOp::Pad {
                 top,
                 bottom,
@@ -363,7 +443,10 @@ impl SampledImageOp {
                 Some(Box::new(Pad::new(*top, *bottom, *left, *right, pad_mode)))
             }
             SampledImageOp::Affine {
-                matrix,
+                scale,
+                rotate,
+                translate,
+                shear,
                 interpolation,
                 border_mode,
             } => {
@@ -382,15 +465,11 @@ impl SampledImageOp {
                     BorderMode::Replicate => AffineBorderMode::Replicate,
                     BorderMode::Wrap => AffineBorderMode::Wrap,
                 };
-                // Matrix is [a, b, c, d, e, f]
-                // For AffineParams reconstruction, we approximate:
-                // scale_x = abs(a), scale_y = abs(e)
-                // translate_x = c, translate_y = f
                 let params = AffineParams {
-                    scale: (matrix[0].abs(), matrix[3].abs()),
-                    rotate: 0.0,
-                    translate: (matrix[4], matrix[5]), // Indices 4, 5 are translation (e, f in col-major)
-                    shear: (0.0, 0.0),
+                    scale: *scale,
+                    rotate: *rotate,
+                    translate: *translate,
+                    shear: *shear,
                 };
                 Some(Box::new(Affine::with_all(
                     params,
@@ -445,6 +524,7 @@ impl SampledImageOp {
             SampledImageOp::Affine { .. } => "Affine",
             SampledImageOp::Resize { .. } => "Resize",
             SampledImageOp::Crop { .. } => "Crop",
+            SampledImageOp::RandomCrop { .. } => "RandomCrop",
             SampledImageOp::Pad { .. } => "Pad",
             SampledImageOp::GaussianBlur { .. } => "GaussianBlur",
             SampledImageOp::MedianBlur { .. } => "MedianBlur",
@@ -467,7 +547,9 @@ impl SampledImageOp {
             SampledImageOp::ToSepia => true,
             SampledImageOp::ToRGB => true,
             SampledImageOp::Invert => true,
-            SampledImageOp::Normalize { .. } => true,
+            // Normalize changes dtype (u8 -> f32): terminal barrier even
+            // though width/height are preserved.
+            SampledImageOp::Normalize { .. } => false,
             SampledImageOp::ColorTemperature { .. } => true,
             SampledImageOp::ChannelMix { .. } => true,
             SampledImageOp::ColorBalance { .. } => true,
@@ -494,6 +576,7 @@ impl SampledImageOp {
             SampledImageOp::Affine { .. } => false,
             SampledImageOp::Resize { .. } => false,
             SampledImageOp::Crop { .. } => false,
+            SampledImageOp::RandomCrop { .. } => false,
             SampledImageOp::Pad { .. } => false,
 
             // Kernel ops preserve shape
@@ -551,7 +634,6 @@ impl SampledImageOp {
                 | SampledImageOp::Contrast { .. }
                 | SampledImageOp::Gamma { .. }
                 | SampledImageOp::Invert
-                | SampledImageOp::Normalize { .. }
                 | SampledImageOp::Posterize { .. }
                 | SampledImageOp::Solarize { .. }
         )
@@ -624,7 +706,8 @@ mod tests {
         assert!(SampledImageOp::Contrast { factor: 1.2 }.is_lut_op());
         assert!(SampledImageOp::Gamma { gamma: 0.8 }.is_lut_op());
         assert!(SampledImageOp::Invert.is_lut_op());
-        assert!(SampledImageOp::Normalize {
+        // Normalize produces float32 output: it is a terminal barrier, not a LUT op
+        assert!(!SampledImageOp::Normalize {
             mean: [0.5; 3],
             std: [0.5; 3]
         }
@@ -645,7 +728,8 @@ mod tests {
         assert!(!SampledImageOp::ToGray.is_lut_op());
         assert!(!SampledImageOp::GaussNoise {
             mean: 0.0,
-            std: 1.0
+            std: 1.0,
+            seed: 0,
         }
         .is_lut_op());
     }

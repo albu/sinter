@@ -1,22 +1,18 @@
 // Affine geometric transform
 //
 // Applies affine transformation: scaling, rotation, translation, shearing.
-//
-// OPTIMIZATION: Optional OpenCV backend for warp_affine using highly optimized C code.
+// OPTIMIZATION: Fast Q16.16 fixed-point coordinate stepper and bundled RGB bilinear interpolation.
 
 mod interpolation;
-#[cfg(feature = "opencv")]
-mod opencv;
+#[cfg(target_arch = "aarch64")]
+mod neon;
 mod rust_impl;
+#[cfg(test)]
 mod tests;
 
 use crate::core::{
     AccessPattern, BarrierImage, Executable, FusableImage, LabelTransform, ShapeEffect, Transform,
 };
-use rust_impl::execute_rust;
-
-#[cfg(feature = "opencv")]
-use opencv::execute_with_opencv;
 
 /// Interpolation method for affine transform
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,7 +112,6 @@ pub enum AffineBorderMode {
 ///
 /// # Notes
 /// - Allocates a new buffer (OutOfPlace)
-/// - With `opencv` feature, uses OpenCV's optimized warp_affine
 #[derive(Debug, Clone, PartialEq)]
 pub struct Affine {
     pub params: AffineParams,
@@ -189,9 +184,14 @@ impl Affine {
         interpolation: AffineInterpolation,
         border_mode: AffineBorderMode,
     ) -> Self {
+        let output_size = if width > 0 && height > 0 {
+            Some((width, height))
+        } else {
+            None
+        };
         Self {
             params,
-            output_size: Some((width, height)),
+            output_size,
             interpolation,
             border_mode,
         }
@@ -203,42 +203,35 @@ impl Affine {
     /// [a, b, c]
     /// [d, e, f]
     /// [0, 0, 1]
-    pub(super) fn build_inverse_matrix(&self) -> [f32; 6] {
-        let cx = self.params.scale.0;
-        let cy = self.params.scale.1;
+    pub(super) fn build_inverse_matrix(&self, in_width: usize, in_height: usize) -> [f32; 6] {
+        let sx = self.params.scale.0;
+        let sy = self.params.scale.1;
         let angle = self.params.rotate.to_radians();
         let cos_a = angle.cos();
         let sin_a = angle.sin();
         let tx = self.params.translate.0;
         let ty = self.params.translate.1;
-        let _shx = self.params.shear.0.tan();
-        let _shy = self.params.shear.1.tan();
+        let shx = self.params.shear.0.to_radians().tan();
+        let shy = self.params.shear.1.to_radians().tan();
 
-        // Forward transform matrix (column-major):
-        // [scale_x*cos, -scale_y*sin, tx]
-        // [scale_x*sin,  scale_y*cos, ty]
-        // [shx,         shy,         1]
-        //
-        // We need the inverse for backward mapping (output to input)
-        //
-        // For simplicity, implement basic scale+rotate+translate without shear:
-        // Forward: [cx*cos, -cy*sin, tx]
-        //          [cx*sin,  cy*cos, ty]
-        // Inverse: [cos/cx,  sin/cx, ...]
-        //          [-sin/cy, cos/cy, ...]
+        let cx = (in_width.saturating_sub(1)) as f32 / 2.0;
+        let cy = (in_height.saturating_sub(1)) as f32 / 2.0;
 
-        let inv_scale_x = if cx != 0.0 { 1.0 / cx } else { 1.0 };
-        let inv_scale_y = if cy != 0.0 { 1.0 / cy } else { 1.0 };
+        let det_shear = 1.0 - shx * shy;
+        let inv_det_shear = if det_shear.abs() > 1e-6 { 1.0 / det_shear } else { 1.0 };
 
-        // Inverse rotation+scale
-        let a = cos_a * inv_scale_x;
-        let b = sin_a * inv_scale_x;
-        let d = -sin_a * inv_scale_y;
-        let e = cos_a * inv_scale_y;
+        let inv_sx = if sx.abs() > 1e-6 { 1.0 / sx } else { 1.0 };
+        let inv_sy = if sy.abs() > 1e-6 { 1.0 / sy } else { 1.0 };
 
-        // Translation contribution (simplified - doesn't account for rotation center)
-        let c = -tx * a - ty * d;
-        let f = -tx * b - ty * e;
+        let a = (cos_a + sin_a * shy) * inv_det_shear * inv_sx;
+        let b = (-cos_a * shx - sin_a) * inv_det_shear * inv_sx;
+        let d = (sin_a - cos_a * shy) * inv_det_shear * inv_sy;
+        let e = (-sin_a * shx + cos_a) * inv_det_shear * inv_sy;
+
+        let target_x = cx + tx;
+        let target_y = cy + ty;
+        let c = cx - (a * target_x + b * target_y);
+        let f = cy - (d * target_x + e * target_y);
 
         [a, b, c, d, e, f]
     }
@@ -359,20 +352,14 @@ impl LabelTransform for Affine {
 }
 
 impl Executable for Affine {
-    #[cfg(not(feature = "opencv"))]
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        Some(execute_rust(self, image))
-    }
-
-    #[cfg(feature = "opencv")]
-    fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        // Try OpenCV backend first, fall back to Rust implementation on error
-        match execute_with_opencv(self, image) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                // Fallback to Rust implementation
-                Some(execute_rust(self, image))
-            }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Some(neon::execute_neon(self, image))
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Some(rust_impl::execute_rust(self, image))
         }
     }
 }

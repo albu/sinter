@@ -29,30 +29,23 @@ impl Equalize {
         Self
     }
 
-    /// Build equalization LUT from image histogram
-    ///
-    /// Uses fixed-point arithmetic to avoid float operations in the hot path.
-    fn build_lut(&self, image: &FusableImage) -> [u8; 256] {
-        let mut histogram = [0u32; 256];
-        let total_pixels = (image.width * image.height * image.channels) as u32;
-
-        // Build histogram - scalar but cache-friendly sequential access
-        for &pixel in image.data.iter() {
-            histogram[pixel as usize] += 1;
+    /// Build equalization LUT for a single channel histogram using OpenCV formula
+    fn compute_lut(hist: &[u32; 256], total_pixels: u32) -> [u8; 256] {
+        let mut i = 0;
+        while i < 256 && hist[i] == 0 {
+            i += 1;
         }
 
-        // Build equalization LUT using CDF with fixed-point arithmetic
-        // Fixed-point: multiply by 255 first, then divide to avoid float
-        let mut cdf = 0u32;
         let mut lut = [0u8; 256];
-
-        for i in 0..256 {
-            cdf += histogram[i];
-            // Fixed-point: (cdf * 255) / total_pixels
-            // This avoids expensive float division
-            lut[i] = ((cdf * 255) / total_pixels) as u8;
+        if i < 256 && hist[i] < total_pixels {
+            let scale = 255.0f32 / ((total_pixels - hist[i]) as f32);
+            let mut sum = 0u32;
+            for j in i..256 {
+                sum += hist[j];
+                let val = ((sum - hist[i]) as f32 * scale).round() as i32;
+                lut[j] = val.clamp(0, 255) as u8;
+            }
         }
-
         lut
     }
 }
@@ -77,10 +70,42 @@ impl Transform for Equalize {
 
 impl Executable for Equalize {
     fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
-        let lut = self.build_lut(image);
+        let channels = image.channels;
+        let total_pixels = (image.width * image.height) as u32;
 
-        // Use optimized LUT executor (NEON vqtbl4q_u8 on ARM)
-        LutExecutor::apply(image, &lut);
+        if channels == 1 {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, total_pixels);
+            LutExecutor::apply(image, &lut);
+        } else if channels == 3 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let chunks = image.data.chunks_exact(3);
+            for chunk in chunks {
+                hist_r[chunk[0] as usize] += 1;
+                hist_g[chunk[1] as usize] += 1;
+                hist_b[chunk[2] as usize] += 1;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+
+            let luts = [lut_r, lut_g, lut_b];
+            LutExecutor::apply_rgb_luts(image, &luts);
+        } else {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, (image.width * image.height * channels) as u32);
+            LutExecutor::apply(image, &lut);
+        }
 
         None
     }
@@ -115,31 +140,48 @@ impl AutoContrast {
     ///
     /// Uses fixed-point arithmetic to avoid float operations.
     fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
-        let mut min_val = 255u8;
-        let mut max_val = 0u8;
-
-        // Find min and max values
+        // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
+        let mut hist = [0u32; 256];
+        let total = image.data.len() as u32;
         for &pixel in image.data.iter() {
-            min_val = min_val.min(pixel);
-            max_val = max_val.max(pixel);
+            hist[pixel as usize] += 1;
         }
 
-        // Handle edge case: uniform image
-        if min_val == max_val {
-            return [0u8; 256]; // All zeros
+        // Trim `cutoff * total` pixels from each end (albumentations semantics:
+        // cutoff is the fraction of pixels ignored at the low and high ends).
+        let trim = (total as f32 * self.cutoff).round() as u32;
+
+        let mut lo = 0u8;
+        let mut remaining = trim;
+        while lo < 255 && remaining >= hist[lo as usize] {
+            remaining -= hist[lo as usize];
+            lo += 1;
+        }
+
+        let mut hi = 255u8;
+        let mut remaining = trim;
+        while hi > 0 && remaining >= hist[hi as usize] {
+            remaining -= hist[hi as usize];
+            hi -= 1;
+        }
+
+        // Uniform (or fully trimmed) image: preserve the historical edge case.
+        if lo >= hi {
+            return [0u8; 256];
         }
 
         // Build linear stretch LUT using fixed-point arithmetic
-        // Formula: lut[i] = ((i - min) * 255) / (max - min)
-        let range = (max_val - min_val) as u32;
-        let min_val = min_val as u32;
+        // Formula: lut[i] = ((i - lo) * 255) / (hi - lo)
+        let range = (hi as u32 - lo as u32) as u32;
         let mut lut = [0u8; 256];
 
         for i in 0..256 {
             let i = i as u32;
             // Fixed-point: (i - min) * 255 / range
-            let normalized = i.saturating_sub(min_val);
-            lut[i as usize] = ((normalized * 255) / range) as u8;
+            let normalized = i.saturating_sub(lo as u32);
+            // Values beyond the trimmed hi end must clamp to 255, not wrap in u8.
+            let v = (normalized * 255) / range;
+            lut[i as usize] = v.min(255) as u8;
         }
 
         lut
@@ -211,6 +253,20 @@ mod tests {
     }
 
     #[test]
+    fn test_equalize_lut_values() {
+        let mut data = Vec::with_capacity(4096);
+        for y in 0..64 {
+            for x in 0..64 {
+                data.push((x as f32 / 64.0 * 255.0) as u8);
+            }
+        }
+        let mut img = FusableImage::new(&mut data, 64, 64, 1);
+        let eq = Equalize::new();
+        eq.execute(&mut img);
+        println!("Rust Equalize img.data[..5]: {:?}", &img.data[..5]);
+    }
+
+    #[test]
     fn test_autocontrast_new() {
         let ac = AutoContrast::new(0.0);
         assert_eq!(ac.cutoff, 0.0);
@@ -263,5 +319,41 @@ mod tests {
 
         assert_eq!(min_val, 0);
         assert_eq!(max_val, 255);
+    }
+
+    #[test]
+    fn test_autocontrast_cutoff_actually_trims() {
+        // Falsification: `cutoff` was previously accepted but swallowed —
+        // build_lut_from_image never read it, so cutoff=0.05 was byte-identical
+        // to cutoff=0. With the histogram-trim implementation, trimming 5% of
+        // pixels from each end must shift the stretch endpoints.
+        let mut data = Vec::with_capacity(256 * 256);
+        for i in 0..(256 * 256) {
+            data.push((i % 256) as u8); // each value appears exactly 256 times
+        }
+
+        let mut d0 = data.clone();
+        let mut img0 = FusableImage::new(&mut d0, 256, 256, 1);
+        AutoContrast::new(0.0).execute(&mut img0);
+        let mut d1 = data.clone();
+        let mut img1 = FusableImage::new(&mut d1, 256, 256, 1);
+        AutoContrast::new(0.05).execute(&mut img1);
+
+        assert_ne!(
+            img0.data, img1.data,
+            "cutoff must change the stretch (was silently ignored)"
+        );
+        // The trimmed LUT uses a narrower input range: value 64 maps to ~64
+        // under the full [0,255] stretch, but to ~57 when 5% is trimmed from
+        // each end ([12,243] range). It must differ.
+        let out = img1.data[64 * 256 + 64];
+        assert!(
+            (out as i32 - 64).abs() > 5,
+            "cutoff stretch should change the mapping, got {}",
+            out
+        );
+        // Values above the trimmed hi end must clamp to 255, not wrap.
+        let hi_out = img1.data[255 * 256 + 255];
+        assert_eq!(hi_out, 255, "upper tail must clamp to 255, got {}", hi_out);
     }
 }
