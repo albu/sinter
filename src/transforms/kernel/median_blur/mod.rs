@@ -42,9 +42,12 @@ impl Default for MedianMode {
 ///
 /// # Implementation
 ///
-/// - **3x3 kernel**: Uses an exact 19-comparator branchless sorting network
-///   with ARM NEON SIMD vectorization (processing 16 pixels per instruction).
-/// - **5x5 kernel**: Uses multi-pass or sliding column-histogram algorithm.
+/// - **3x3 kernel**: ARM NEON column-cache construction (sort3 on each column +
+///   median-of-sorted-columns combine, ~28 vector min/max ops per 16 lanes),
+///   with the 19-comparator `median9` selection network as the scalar fallback.
+/// - **5x5 kernel**: ARM NEON 140-comparator odd-even mergesort network (25-input
+///   sort, median at position 12). A sliding column-histogram implementation exists
+///   but is ~8-13x slower on ARM64 and is used only off-ARM / for tiny images.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MedianBlur {
     pub kernel_size: MedianKernelSize,
@@ -322,5 +325,55 @@ mod tests {
         assert_ne!(img.data[10], 0);
         assert_ne!(img.data[50], 255);
         assert_ne!(img.data[90], 0);
+    }
+
+    #[test]
+    #[ignore = "manual micro-benchmark: cargo test --release -- --ignored median_bench_5x5 --nocapture"]
+    fn median_bench_5x5() {
+        use std::time::Instant;
+        let (w, h) = (512usize, 512usize);
+        for channels in [1usize, 3usize] {
+            let mut data: Vec<u8> = (0..w * h * channels)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) >> 32) & 0xFF) as u8)
+                .collect();
+
+            // Warmup both paths.
+            for _ in 0..3 {
+                let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                MedianBlur::kernel5().execute(&mut img);
+                let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                histogram::apply_median_blur_5x5(&mut img);
+            }
+
+            let mut best_sortnet = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                for _ in 0..10 {
+                    let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                    MedianBlur::kernel5().execute(&mut img);
+                }
+                best_sortnet = best_sortnet.min(t.elapsed().as_secs_f64() / 10.0 * 1000.0);
+            }
+
+            let mut best_hist = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                for _ in 0..10 {
+                    let mut img = FusableImage::new(data.as_mut_slice(), w, h, channels);
+                    histogram::apply_median_blur_5x5(&mut img);
+                }
+                best_hist = best_hist.min(t.elapsed().as_secs_f64() / 10.0 * 1000.0);
+            }
+
+            println!(
+                "median5x5 {}x{} channels={}: sortnet {:.4} ms | histogram {:.4} ms | ratio {:.2}x",
+                w,
+                h,
+                channels,
+                best_sortnet,
+                best_hist,
+                best_hist / best_sortnet
+            );
+        }
     }
 }
