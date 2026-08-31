@@ -2,6 +2,9 @@
 //
 // Uses fixed-point Q16.16 coordinate stepping, bundled RGB sampling,
 // and branchless interior interpolation.
+//
+// Note: Reference implementation used for test verification and fallback.
+#![allow(dead_code)]
 
 use crate::core::{BarrierImage, FusableImage};
 use crate::transforms::geometric::affine::{Affine, AffineBorderMode, AffineInterpolation};

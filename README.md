@@ -5,17 +5,11 @@
 </p>
 
 <p align="center">
-  <i>A research prototype exploring compiler-based optimization for image augmentation</i>
+  <i>A compiler-accelerated image augmentation engine in pure Rust + SIMD</i>
 </p>
 
 [![License: CC-BY-NC-SA 4.0](https://img.shields.io/badge/license-CC--BY--NC--SA%204.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-
----
-
-*"Surprise! You've built a ~44,000 line research project!"*
-
-**Research prototype. No warranty provided. Not intended for production use. API stability not guaranteed.**
 
 ---
 
@@ -220,40 +214,73 @@ for img in batch:
 
 ---
 
-## Why Rust + NEON?
-
-This prototype is written in Rust to explore:
-
-1. **Zero-cost abstractions**: Can we express transform composition without runtime overhead?
-2. **Type-level optimization**: Can the compiler prove fusion safety?
-3. **SIMD integration**: Hand-written NEON intrinsics for ARM64 (Apple Silicon, AWS Graviton)
-
-Performance matters: the ~1.6–17× speedup vs traditional libraries comes from both fusion optimizations and hand-tuned NEON code.
+## Why Pure Rust + SIMD?
+ 
+Sinter is built in 100% pure native Rust to deliver:
+ 
+1. **Zero-cost abstractions**: Compile transform pipelines into single-pass execution plans without runtime overhead.
+2. **Compiler-proven optimization**: Provable operator fusion for photometric, geometric, and matrix pipelines.
+3. **Native SIMD acceleration**: Hand-optimized NEON (ARM64) and SIMD intrinsics with zero C++ or OpenCV dependencies.
+ 
+Performance matters: the ~1.6–17× speedup vs traditional libraries comes from both compiler fusion optimizations and hand-tuned native SIMD kernels.
 
 ---
 
 ## Quick Experiment
 
 ```python
-from sinter import Compose, Brightness, Contrast, Gamma
 import numpy as np
+import torch
+from sinter import (
+    Compose, HorizontalFlip, Affine, Resize,
+    Brightness, Contrast, HueSaturationValue, RGBShift, GaussNoise,
+    GaussianBlur, Uniform
+)
 
-# Define a pipeline
-pipeline = Compose([
-    Brightness(delta=50.0),
-    Contrast(factor=0.2),
-    Gamma(gamma=1.5),
+# 1. Pipeline creation with distributions and flexible aliases
+geom = Compose([
+    HorizontalFlip(p=0.5),
+    Affine(scale=(0.9, 1.1), rotate=Uniform(-10, 10), border_mode="reflect", p=0.8),
+    Resize(width=256, height=256),
 ])
 
-# Apply directly to numpy arrays (safe copy-by-default)
-img = np.random.randint(0, 256, (512, 512, 3), dtype=np.uint8)
-result = pipeline.apply(img)
+photo = Compose([
+    Brightness(delta=(-20, 20)),
+    Contrast(factor=(0.8, 1.2)),
+    HueSaturationValue(hue_shift=(-15, 15), sat_shift=(-20, 20)),
+    RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15),
+    GaussNoise(var_limit=(10, 40)),
+])
 
-# For maximum zero-copy throughput when reusing buffers:
-result_fast = pipeline.apply(img, inplace=True)
+# 2. Composition & Slicing
+pipeline = geom + photo + [GaussianBlur(kernel_size=5, p=0.3)]
+sub_pipeline = pipeline[1:4]  # Slicing returns a sub-Compose
+
+# 3. Direct Introspection
+print(pipeline.explain())     # Shows fused execution nodes
+print(pipeline.to_mermaid())  # Renders Mermaid diagram
+
+# 4. Multi-Target Call (NumPy arrays, PyTorch CHW tensors, Python lists)
+img_tensor = torch.randint(0, 255, (3, 300, 300), dtype=torch.uint8)
+seg_mask = np.zeros((300, 300), dtype=np.uint8)
+coco_boxes = [[20, 30, 100, 120, 1]]
+
+res = pipeline(image=img_tensor, mask=seg_mask, bboxes=coco_boxes, bbox_format="coco")
+out_img = res["image"]    # torch.Tensor (CHW preserved)
+out_mask = res["mask"]    # np.ndarray
+out_boxes = res["bboxes"] # Python list
+
+# 5. Multi-Core Rayon Batching (Releases GIL)
+batch = torch.randint(0, 255, (16, 3, 256, 256), dtype=torch.uint8)
+out_batch = pipeline.apply_batch(batch, num_threads=4)
+
+# 6. Sampled Program for Deterministic Multi-Frame Reuse
+sampled = pipeline.sample(seed=42)
+frame1 = sampled(image=img_tensor)
+frame2 = sampled(image=img_tensor)
 ```
 
-**Memory Semantics**: By default, Sinter uses safe memory semantics (`inplace=False`), so your original image arrays are never modified. To enable zero-copy execution without buffer allocation, pass `inplace=True`.
+**Memory Semantics**: By default, Sinter uses safe memory semantics (`inplace=False`), so your original image arrays are never modified. Out-of-place pipelines (Resize, Crop, Pad, Affine) execute with zero-copy overhead. For maximum in-place performance on disposable buffers, pass `inplace=True`.
 
 ---
 
@@ -266,7 +293,7 @@ result_fast = pipeline.apply(img, inplace=True)
 pip install sinter-0.1.0-cp311-cp311-macosx_11_0_arm64.whl
 ```
 
-The only dependency is `numpy>=1.20`. OpenCV is statically linked.
+Sinter is **100% pure Rust + SIMD** with zero OpenCV or C++ dependencies. The only Python dependency is `numpy>=1.20` (and optionally `torch` for tensor workflows).
 
 ---
 
@@ -300,26 +327,29 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for architectural details and IR design.
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Deep dive into IR design, fusion rules, and optimization
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** - How transforms are implemented and extended
+- **[OPERATORS.md](OPERATORS.md)** - Complete reference of all supported transforms and fusion rules
 
 ---
 
 ## Project Status
 
-This is an ongoing research project. Topics I'm exploring:
+This is an ongoing research project. Topics explored:
 
+- [x] Compilation & JIT-style operator fusion (LUT, matrix, geometric D4)
+- [x] Pure native SIMD architecture (zero C++ dependencies)
+- [x] Zero-copy PyTorch tensor & multi-target transformation
+- [x] High-throughput parallel batch execution (Rayon + GIL release)
+- [x] Visualization of compiled plans (`explain`, `to_mermaid`, `visualize`)
 - [ ] More photometric transform types
-- [ ] Visualization of compiled plans
 
 ---
 
 ## Background
 
-I co-created [Albumentations](https://github.com/albumentations-team/albumentations) ~8 years ago. It became successful, which eventually became exhausting. Sinter is my exploration of whether there's a fundamentally different approach to the problem - not as a replacement, but as a way to explore ideas that didn't fit into the Albumentations architecture.
+From a co-creator of [Albumentations](https://github.com/albumentations-team/albumentations), Sinter is a next-generation exploration into compiler-accelerated computer vision pipelines, rethinking image augmentation from the ground up through IR compilation, operator fusion, and zero-copy native SIMD execution.
 
 ---
 
 ## License
 
 Creative Commons BY-NC-SA 4.0 - See [LICENSE](LICENSE)
-
-**Non-commercial, share-alike**. This is research, not a product.

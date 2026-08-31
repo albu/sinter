@@ -3,6 +3,9 @@
 // Maintains 16-bin coarse and fine histograms per column.
 // Single instruction horizontal updates (vaddq_u8 / vsubq_u8 in ARM NEON SIMD).
 // Mathematically exact to OpenCV (0% error), O(1) per pixel.
+//
+// Note: Reference histogram implementations used for validation in unit tests.
+#![allow(dead_code)]
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;

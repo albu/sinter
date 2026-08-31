@@ -100,6 +100,7 @@ unsafe fn transpose_rgb_8x8_tile(
 /// Process a single 8x8 grayscale tile for transpose
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
+#[allow(dead_code)]
 unsafe fn transpose_gray_8x8_tile(
     src: &[u8],
     dst: &mut [u8],

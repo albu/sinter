@@ -75,7 +75,8 @@ impl Executable for Sharpen {
 }
 
 impl Sharpen {
-    /// Pure Rust implementation (used as fallback or when opencv feature is disabled)
+    /// Pure Rust implementation (used as scalar fallback reference)
+    #[allow(dead_code)]
     fn execute_rust(&self, image: &mut FusableImage) {
         // Standard sharpen kernel
         //  0  -1   0

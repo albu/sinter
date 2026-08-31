@@ -227,14 +227,14 @@ pub fn convolve_separable(image: &mut FusableImage, kernel: &[i32], scale: i32) 
     // the vertical pass doesn't read from partially-written data.
     // The SIMD implementations handle this correctly by using separate buffers.
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         // Use SIMD-optimized version when available
         use super::convolve_simd;
         convolve_simd::convolve_separable_detect(image, kernel, scale);
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(target_arch = "aarch64"))]
     {
         // Scalar fallback for other architectures
         convolve_1d_horizontal(image, kernel, scale);

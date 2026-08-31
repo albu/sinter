@@ -7,6 +7,7 @@ mod interpolation;
 #[cfg(target_arch = "aarch64")]
 mod neon;
 mod rust_impl;
+#[cfg(test)]
 mod tests;
 
 use crate::core::{

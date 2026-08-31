@@ -142,22 +142,24 @@ fn blur_specialized(image: &mut FusableImage, sigma: f32) {
 
     match tap_count {
         3 => {
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 2, 1][..], 4);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(image, &[1, 2, 1][..], 4);
             }
         }
         5 => {
             // Pascal row 4: [1, 4, 6, 4, 1] -> sum = 16
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 4, 6, 4, 1][..], 16);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(
                     image,
@@ -168,11 +170,12 @@ fn blur_specialized(image: &mut FusableImage, sigma: f32) {
         }
         7 => {
             // Pascal row 6: [1, 6, 15, 20, 15, 6, 1] -> sum = 64
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
             {
+                use crate::transforms::kernel::convolve_simd;
                 convolve_simd::convolve_separable_detect(image, &[1, 6, 15, 20, 15, 6, 1][..], 64);
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "aarch64"))]
             {
                 crate::transforms::kernel::convolve::convolve_separable(
                     image,

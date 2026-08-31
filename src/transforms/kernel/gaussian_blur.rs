@@ -102,12 +102,12 @@ impl GaussianBlur {
                 // 3x3 Gaussian - use unified separable convolution [1 2 1] for SIMD
                 // Preserves u16 precision between horizontal and vertical passes!
                 let kernel = [1, 2, 1];
-                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                #[cfg(target_arch = "aarch64")]
                 {
                     use super::convolve_simd;
                     convolve_simd::convolve_separable_detect(image, &kernel[..], 4);
                 }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     convolve_separable(image, &kernel[..], 4);
                 }
@@ -115,12 +115,12 @@ impl GaussianBlur {
             KernelSize::Size5 => {
                 // 5x5 Gaussian - use separable convolution [1 4 6 4 1] for SIMD
                 let kernel = [1, 4, 6, 4, 1];
-                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                #[cfg(target_arch = "aarch64")]
                 {
                     use super::convolve_simd;
                     convolve_simd::convolve_separable_detect(image, &kernel[..], 16);
                 }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     convolve_separable(image, &kernel[..], 16);
                 }
@@ -130,12 +130,12 @@ impl GaussianBlur {
                 // [2, 7, 14, 18, 14, 7, 2] / 64
                 // Sum = 64
                 let kernel = [2i32, 7, 14, 18, 14, 7, 2];
-                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                #[cfg(target_arch = "aarch64")]
                 {
                     use super::convolve_simd;
                     convolve_simd::convolve_separable_detect(image, &kernel[..], 64);
                 }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     convolve_separable(image, &kernel[..], 64);
                 }

@@ -1,6 +1,7 @@
 // Scalar (non-SIMD) LUT executor implementations
 //
 // Provides simple and unrolled loops for LUT application.
+#![allow(dead_code)]
 
 use crate::core::FusableImage;
 
