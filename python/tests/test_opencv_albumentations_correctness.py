@@ -8,10 +8,14 @@ This test suite rigorously tests:
 4. Exact numerical equality (for discrete ops) and perceptual/numerical bounds (for continuous/floating-point ops).
 """
 
-import cv2
 import numpy as np
 import pytest
-import albumentations as A
+
+# cv2 / albumentations are test-only dependencies used as ground truth for
+# cross-validation; skip gracefully when absent (CI wheel builds need only
+# numpy + pytest).
+cv2 = pytest.importorskip("cv2")
+A = pytest.importorskip("albumentations")
 
 import sinter
 from sinter import (

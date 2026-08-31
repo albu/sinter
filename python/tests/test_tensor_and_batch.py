@@ -1,6 +1,9 @@
 import numpy as np
 import pytest
-import torch
+
+# torch is a test-only dependency (tensor interop tests); skip gracefully
+# when absent so CI wheel builds need only numpy + pytest.
+torch = pytest.importorskip("torch")
 
 pytest.importorskip("sinter")
 

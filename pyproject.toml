@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sinter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Research prototype for compiler-based image augmentation optimization"
 requires-python = ">=3.8"
 license = {text = "CC-BY-NC-SA-4.0"}  # Research/educational use only, see LICENSE
@@ -16,6 +16,7 @@ dependencies = [
 test = [
     "pytest>=7.0",
     "albumentations>=1.3.0",
+    "torch>=2.0",
 ]
 
 [tool.maturin]
