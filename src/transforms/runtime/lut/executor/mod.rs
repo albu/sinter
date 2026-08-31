@@ -119,6 +119,25 @@ impl LutExecutor {
             scalar::LutExecutorScalar::apply_simple(image, lut);
         }
     }
+
+    /// Apply a per-channel LUT to an interleaved RGB image (3 channels).
+    ///
+    /// Byte `i` of the image is remapped through `luts[i % 3]`. On ARM this
+    /// uses a NEON vld3q/vst3q gather; elsewhere it falls back to scalar.
+    pub fn apply_rgb_luts(image: &mut FusableImage, luts: &[[u8; 256]; 3]) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if image.data.len() >= 48 {
+                unsafe { neon::apply_neon_vqtbl3(image, luts); }
+                return;
+            }
+        }
+
+        let data = &mut image.data;
+        for (i, px) in data.iter_mut().enumerate() {
+            *px = luts[i % 3][*px as usize];
+        }
+    }
 }
 
 // Re-export the scalar implementation for external use

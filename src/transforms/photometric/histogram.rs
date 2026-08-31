@@ -96,15 +96,8 @@ impl Executable for Equalize {
             let lut_g = Self::compute_lut(&hist_g, total_pixels);
             let lut_b = Self::compute_lut(&hist_b, total_pixels);
 
-            let data = &mut image.data;
-            let len = data.len();
-            let mut i = 0;
-            while i + 3 <= len {
-                data[i] = lut_r[data[i] as usize];
-                data[i + 1] = lut_g[data[i + 1] as usize];
-                data[i + 2] = lut_b[data[i + 2] as usize];
-                i += 3;
-            }
+            let luts = [lut_r, lut_g, lut_b];
+            LutExecutor::apply_rgb_luts(image, &luts);
         } else {
             let mut hist = [0u32; 256];
             for &pixel in image.data.iter() {
