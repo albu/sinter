@@ -140,31 +140,48 @@ impl AutoContrast {
     ///
     /// Uses fixed-point arithmetic to avoid float operations.
     fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
-        let mut min_val = 255u8;
-        let mut max_val = 0u8;
-
-        // Find min and max values
+        // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
+        let mut hist = [0u32; 256];
+        let total = image.data.len() as u32;
         for &pixel in image.data.iter() {
-            min_val = min_val.min(pixel);
-            max_val = max_val.max(pixel);
+            hist[pixel as usize] += 1;
         }
 
-        // Handle edge case: uniform image
-        if min_val == max_val {
-            return [0u8; 256]; // All zeros
+        // Trim `cutoff * total` pixels from each end (albumentations semantics:
+        // cutoff is the fraction of pixels ignored at the low and high ends).
+        let trim = (total as f32 * self.cutoff).round() as u32;
+
+        let mut lo = 0u8;
+        let mut remaining = trim;
+        while lo < 255 && remaining >= hist[lo as usize] {
+            remaining -= hist[lo as usize];
+            lo += 1;
+        }
+
+        let mut hi = 255u8;
+        let mut remaining = trim;
+        while hi > 0 && remaining >= hist[hi as usize] {
+            remaining -= hist[hi as usize];
+            hi -= 1;
+        }
+
+        // Uniform (or fully trimmed) image: preserve the historical edge case.
+        if lo >= hi {
+            return [0u8; 256];
         }
 
         // Build linear stretch LUT using fixed-point arithmetic
-        // Formula: lut[i] = ((i - min) * 255) / (max - min)
-        let range = (max_val - min_val) as u32;
-        let min_val = min_val as u32;
+        // Formula: lut[i] = ((i - lo) * 255) / (hi - lo)
+        let range = (hi as u32 - lo as u32) as u32;
         let mut lut = [0u8; 256];
 
         for i in 0..256 {
             let i = i as u32;
             // Fixed-point: (i - min) * 255 / range
-            let normalized = i.saturating_sub(min_val);
-            lut[i as usize] = ((normalized * 255) / range) as u8;
+            let normalized = i.saturating_sub(lo as u32);
+            // Values beyond the trimmed hi end must clamp to 255, not wrap in u8.
+            let v = (normalized * 255) / range;
+            lut[i as usize] = v.min(255) as u8;
         }
 
         lut
@@ -302,5 +319,41 @@ mod tests {
 
         assert_eq!(min_val, 0);
         assert_eq!(max_val, 255);
+    }
+
+    #[test]
+    fn test_autocontrast_cutoff_actually_trims() {
+        // Falsification: `cutoff` was previously accepted but swallowed —
+        // build_lut_from_image never read it, so cutoff=0.05 was byte-identical
+        // to cutoff=0. With the histogram-trim implementation, trimming 5% of
+        // pixels from each end must shift the stretch endpoints.
+        let mut data = Vec::with_capacity(256 * 256);
+        for i in 0..(256 * 256) {
+            data.push((i % 256) as u8); // each value appears exactly 256 times
+        }
+
+        let mut d0 = data.clone();
+        let mut img0 = FusableImage::new(&mut d0, 256, 256, 1);
+        AutoContrast::new(0.0).execute(&mut img0);
+        let mut d1 = data.clone();
+        let mut img1 = FusableImage::new(&mut d1, 256, 256, 1);
+        AutoContrast::new(0.05).execute(&mut img1);
+
+        assert_ne!(
+            img0.data, img1.data,
+            "cutoff must change the stretch (was silently ignored)"
+        );
+        // The trimmed LUT uses a narrower input range: value 64 maps to ~64
+        // under the full [0,255] stretch, but to ~57 when 5% is trimmed from
+        // each end ([12,243] range). It must differ.
+        let out = img1.data[64 * 256 + 64];
+        assert!(
+            (out as i32 - 64).abs() > 5,
+            "cutoff stretch should change the mapping, got {}",
+            out
+        );
+        // Values above the trimmed hi end must clamp to 255, not wrap.
+        let hi_out = img1.data[255 * 256 + 255];
+        assert_eq!(hi_out, 255, "upper tail must clamp to 255, got {}", hi_out);
     }
 }
