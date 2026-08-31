@@ -25,3 +25,6 @@ libbuild.rmeta
 .worktrees/
 worktrees/
 
+
+# Build artifacts (CI builds and uploads wheels)
+dist/
