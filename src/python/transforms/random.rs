@@ -34,9 +34,10 @@ fn apply_node_to_targets<'py>(
     node: RandomImageNode,
     p: Dist,
     image: &'py PyAny,
-    bboxes: Option<&PyArray2<f32>>,
-    keypoints: Option<&PyArray2<f32>>,
-    masks: Option<&PyAny>,
+    bboxes: Option<&'py PyAny>,
+    keypoints: Option<&'py PyAny>,
+    masks: Option<&'py PyAny>,
+    mask: Option<&'py PyAny>,
     bbox_format: &str,
     keypoint_format: &str,
     inplace: Option<bool>,
@@ -45,22 +46,27 @@ fn apply_node_to_targets<'py>(
     // Image-only calls return the transformed array directly (parity with
     // .apply()); passing any label target switches to the dict form, like
     // Compose.__call__.
-    if bboxes.is_none() && keypoints.is_none() && masks.is_none() {
+    if bboxes.is_none() && keypoints.is_none() && masks.is_none() && mask.is_none() {
         return Ok(apply_node_to_image(node, p, image, inplace, py)?.to_object(py));
     }
 
     let mut prog = RandomImageProgram::new();
     prog.add(maybe_wrap(node, p));
-    let compose = PyCompose { inner: prog };
+    let compose = PyCompose {
+        inner: prog,
+        transforms: Vec::new(),
+    };
     compose.__call__(
         image,
         bboxes,
         keypoints,
         masks,
+        mask,
         bbox_format,
         keypoint_format,
         None,
         inplace,
+        None, // labels
         py,
     )
 }
@@ -75,7 +81,10 @@ fn apply_node_to_image<'py>(
 ) -> PyResult<&'py PyAny> {
     let mut prog = RandomImageProgram::new();
     prog.add(maybe_wrap(node, p));
-    let compose = PyCompose { inner: prog };
+    let compose = PyCompose {
+        inner: prog,
+        transforms: Vec::new(),
+    };
     compose.apply(array, inplace, None, py)
 }
 
@@ -180,9 +189,10 @@ fn parse_channel_shuffle_order(val: Option<&PyAny>) -> PyResult<u8> {
 
 macro_rules! define_basic_transforms {
     (
-        $( $name:ident ( $py_struct:ident, $py_name:literal ) { $( $field:ident : $default_expr:expr ),* } => $node_gen:expr ),*
+        $( $(#[$meta:meta])* $name:ident ( $py_struct:ident, $py_name:literal ) { $( $field:ident : $default_expr:expr ),* } => $node_gen:expr ),*
     ) => {
         $(
+            $(#[$meta])*
             #[cfg(feature = "python")]
             #[pyclass(name = $py_name)]
             pub struct $py_struct {
@@ -207,13 +217,14 @@ macro_rules! define_basic_transforms {
                     })
                 }
 
-                #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+                #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
                 fn __call__<'py>(
                     &self,
                     image: &'py PyAny,
-                    bboxes: Option<&PyArray2<f32>>,
-                    keypoints: Option<&PyArray2<f32>>,
-                    masks: Option<&PyAny>,
+                    bboxes: Option<&'py PyAny>,
+                    keypoints: Option<&'py PyAny>,
+                    masks: Option<&'py PyAny>,
+                    mask: Option<&'py PyAny>,
                     bbox_format: &str,
                     keypoint_format: &str,
                     inplace: Option<bool>,
@@ -221,7 +232,7 @@ macro_rules! define_basic_transforms {
                 ) -> PyResult<PyObject> {
                     let gen = $node_gen;
                     let node = gen(self);
-                    apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+                    apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
                 }
 
                 #[pyo3(signature = (array, inplace=None))]
@@ -270,34 +281,47 @@ macro_rules! define_basic_transforms {
 // ============================================================================
 
 define_basic_transforms! {
+    #[doc = "Flip horizontally (mirror left-right)."]
     HorizontalFlip(PyHorizontalFlip, "HorizontalFlip") {} => |_| RandomImageNode::HorizontalFlip,
+    #[doc = "Flip vertically (mirror top-bottom)."]
     VerticalFlip(PyVerticalFlip, "VerticalFlip") {} => |_| RandomImageNode::VerticalFlip,
+    #[doc = "Transpose axes (swap width and height)."]
     Transpose(PyTranspose, "Transpose") {} => |_| RandomImageNode::Transpose,
+    #[doc = "Invert pixel values (255 - x)."]
     Invert(PyInvert, "Invert") {} => |_| RandomImageNode::Invert,
+    #[doc = "Convert RGB to grayscale (single channel)."]
     ToGray(PyToGray, "ToGray") {} => |_| RandomImageNode::ToGray,
+    #[doc = "Apply a sepia color matrix."]
     ToSepia(PyToSepia, "ToSepia") {} => |_| RandomImageNode::ToSepia,
+    #[doc = "Convert grayscale to RGB (channel replication)."]
     ToRGB(PyToRGB, "ToRGB") {} => |_| RandomImageNode::ToRGB,
+    #[doc = "Histogram equalization (per channel)."]
     Equalize(PyEqualize, "Equalize") {} => |_| RandomImageNode::Equalize,
-    AutoContrast(PyAutoContrast, "AutoContrast") {} => |_| RandomImageNode::AutoContrast,
+    #[doc = "Stretch contrast to the full range, optionally ignoring extreme outliers (cutoff 0.0-0.5)."]
+    AutoContrast(PyAutoContrast, "AutoContrast") { cutoff: 0.0 } => |obj: &PyAutoContrast| RandomImageNode::AutoContrast { cutoff: obj.cutoff.clone() },
 
+    #[doc = "Add a constant delta to pixel values."]
     Brightness(PyBrightness, "Brightness") { delta: 0.0 } => |obj: &PyBrightness| RandomImageNode::Brightness { delta: obj.delta.clone() },
+    #[doc = "Scale contrast by a factor."]
     Contrast(PyContrast, "Contrast") { factor: 1.0 } => |obj: &PyContrast| RandomImageNode::Contrast { factor: obj.factor.clone() },
+    #[doc = "Reduce the number of bits per channel (posterize)."]
     Posterize(PyPosterize, "Posterize") { bits: 4.0 } => |obj: &PyPosterize| RandomImageNode::Posterize { bits: obj.bits.clone() },
+    #[doc = "Solarize: invert pixels above a threshold."]
     Solarize(PySolarize, "Solarize") { threshold: 128.0 } => |obj: &PySolarize| RandomImageNode::Solarize { threshold: obj.threshold.clone() },
+    #[doc = "Apply a gamma correction."]
     Gamma(PyGamma, "Gamma") { gamma: 1.0 } => |obj: &PyGamma| RandomImageNode::Gamma { gamma: obj.gamma.clone() },
+    #[doc = "Sharpen the image (3x3 laplacian blend, strength 0-1)."]
     Sharpen(PySharpen, "Sharpen") { strength: 0.5 } => |obj: &PySharpen| RandomImageNode::Sharpen { strength: obj.strength.clone() },
 
-    GaussNoise(PyGaussNoise, "GaussNoise") { mean: 0.0, std: 10.0 } => |obj: &PyGaussNoise| RandomImageNode::GaussNoise { mean: obj.mean.clone(), std: obj.std.clone() },
+    #[doc = "Multiply each pixel by a random factor (speckle noise)."]
     MultiplicativeNoise(PyMultiplicativeNoise, "MultiplicativeNoise") { multiplier: 1.0 } => |obj: &PyMultiplicativeNoise| RandomImageNode::MultiplicativeNoise { multiplier: obj.multiplier.clone() },
+    #[doc = "Replace random pixels with salt (255) or pepper (0)."]
     SaltAndPepper(PySaltAndPepper, "SaltAndPepper") { amount: 0.05, salt_vs_pepper: 0.5 } => |obj: &PySaltAndPepper| RandomImageNode::SaltAndPepper { amount: obj.amount.clone(), salt_vs_pepper: obj.salt_vs_pepper.clone() },
 
-    RGBShift(PyRGBShift, "RGBShift") { r_shift: 0.0, g_shift: 0.0, b_shift: 0.0 } => |obj: &PyRGBShift| RandomImageNode::RGBShift { r_shift: obj.r_shift.clone(), g_shift: obj.g_shift.clone(), b_shift: obj.b_shift.clone() },
-    HueSaturationValue(PyHueSaturationValue, "HueSaturationValue") { hue_shift: 0.0, saturation_scale: 1.0, value_scale: 1.0 } => |obj: &PyHueSaturationValue| RandomImageNode::HueSaturationValue { hue_shift: obj.hue_shift.clone(), saturation_scale: obj.saturation_scale.clone(), value_scale: obj.value_scale.clone() },
-
+    #[doc = "Adjust color temperature (Kelvin-like tint)."]
     ColorTemperature(PyColorTemperature, "ColorTemperature") { temperature: 0.0 } => |obj: &PyColorTemperature| RandomImageNode::ColorTemperature { temperature: obj.temperature.clone() },
-    ColorBalance(PyColorBalance, "ColorBalance") { r_scale: 1.0, g_scale: 1.0, b_scale: 1.0 } => |obj: &PyColorBalance| RandomImageNode::ColorBalance { r_scale: obj.r_scale.clone(), g_scale: obj.g_scale.clone(), b_scale: obj.b_scale.clone() },
-
-    Crop(PyCrop, "Crop") { x: 0.0, y: 0.0, width: 100.0, height: 100.0 } => |obj: &PyCrop| RandomImageNode::Crop { x: obj.x.clone(), y: obj.y.clone(), width: obj.width.clone(), height: obj.height.clone() }
+    #[doc = "Scale the R/G/B channels independently."]
+    ColorBalance(PyColorBalance, "ColorBalance") { r_scale: 1.0, g_scale: 1.0, b_scale: 1.0 } => |obj: &PyColorBalance| RandomImageNode::ColorBalance { r_scale: obj.r_scale.clone(), g_scale: obj.g_scale.clone(), b_scale: obj.b_scale.clone() }
 }
 
 // ============================================================================
@@ -306,9 +330,10 @@ define_basic_transforms! {
 
 macro_rules! define_discrete_transforms {
     (
-        $( $name:ident ( $py_struct:ident, $py_name:literal ) { $field:ident : $type:ty = $default:expr, values: $valid_values:expr } => $node_gen:expr ),*
+        $( $(#[$meta:meta])* $name:ident ( $py_struct:ident, $py_name:literal ) { $field:ident : $type:ty = $default:expr, values: $valid_values:expr } => $node_gen:expr ),*
     ) => {
         $(
+            $(#[$meta])*
             #[cfg(feature = "python")]
             #[pyclass(name = $py_name)]
             pub struct $py_struct {
@@ -336,13 +361,14 @@ macro_rules! define_discrete_transforms {
                     })
                 }
 
-                #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+                #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
                 fn __call__<'py>(
                     &self,
                     image: &'py PyAny,
-                    bboxes: Option<&PyArray2<f32>>,
-                    keypoints: Option<&PyArray2<f32>>,
-                    masks: Option<&PyAny>,
+                    bboxes: Option<&'py PyAny>,
+                    keypoints: Option<&'py PyAny>,
+                    masks: Option<&'py PyAny>,
+                    mask: Option<&'py PyAny>,
                     bbox_format: &str,
                     keypoint_format: &str,
                     inplace: Option<bool>,
@@ -350,7 +376,7 @@ macro_rules! define_discrete_transforms {
                 ) -> PyResult<PyObject> {
                     let gen = $node_gen;
                     let node = gen(self);
-                    apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+                    apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
                 }
 
                 #[pyo3(signature = (array, inplace=None))]
@@ -385,7 +411,9 @@ macro_rules! define_discrete_transforms {
 }
 
 define_discrete_transforms! {
+    #[doc = "Gaussian blur with a fixed kernel size (3, 5, 7, 13, 21, 31)."]
     GaussianBlur(PyGaussianBlur, "GaussianBlur") { kernel_size: u32 = 3, values: [3, 5, 7, 13, 21, 31] } => |obj: &PyGaussianBlur| RandomImageNode::GaussianBlur { kernel_size: obj.kernel_size },
+    #[doc = "Median blur with a 3x3 or 5x5 kernel."]
     MedianBlur(PyMedianBlur, "MedianBlur") { kernel_size: u32 = 3, values: [3, 5] } => |obj: &PyMedianBlur| RandomImageNode::MedianBlur { kernel_size: obj.kernel_size }
 }
 
@@ -453,13 +481,14 @@ impl PyChannelShuffle {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -476,7 +505,7 @@ impl PyChannelShuffle {
         let node = RandomImageNode::ChannelShuffle {
             order: permutations[(self.order as usize) % 6],
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -515,6 +544,7 @@ impl PyChannelShuffle {
 // ============================================================================
 
 /// Rotate - rotate by 90, 180, or 270 degrees
+/// Rotate by a fixed angle (90/180/270) or a random one via a distribution.
 #[cfg(feature = "python")]
 #[pyclass(name = "Rotate")]
 pub struct PyRotate {
@@ -539,20 +569,21 @@ impl PyRotate {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
         let node = RandomImageNode::Rotate { angle: self.angle };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -577,6 +608,7 @@ impl PyRotate {
 }
 
 /// Resize - resize to specific dimensions
+/// Resize to a target width/height (nearest or bilinear).
 #[cfg(feature = "python")]
 #[pyclass(name = "Resize")]
 pub struct PyResize {
@@ -615,13 +647,14 @@ impl PyResize {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -632,7 +665,7 @@ impl PyResize {
             height: self.height,
             interpolation: self.interpolation,
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -668,6 +701,7 @@ impl PyResize {
 }
 
 /// Pad - pad image
+/// Pad the image on each side (constant, reflect, replicate, or wrap).
 #[cfg(feature = "python")]
 #[pyclass(name = "Pad")]
 pub struct PyPad {
@@ -722,13 +756,14 @@ impl PyPad {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -742,7 +777,7 @@ impl PyPad {
             mode: self.mode,
             value: self.value,
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -783,6 +818,8 @@ impl PyPad {
 }
 
 /// Affine - affine transformation (scale, rotate, translate, shear)
+/// Affine transform: scale, rotate, translate, shear with bilinear/nearest
+/// interpolation and a configurable border mode.
 #[cfg(feature = "python")]
 #[pyclass(name = "Affine")]
 pub struct PyAffine {
@@ -838,13 +875,14 @@ impl PyAffine {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -858,7 +896,7 @@ impl PyAffine {
             interpolation: self.interpolation,
             border_mode: self.border_mode,
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -923,6 +961,21 @@ impl PyNormalize {
     #[new]
     #[pyo3(signature = (mean=None, std=None, p=None))]
     fn new(mean: Option<&PyAny>, std: Option<&PyAny>, p: Option<&PyAny>) -> PyResult<Self> {
+        for (v, name) in [(mean, "mean"), (std, "std")] {
+            if let Some(v) = v {
+                if v.extract::<(f64, f64, f64)>().is_ok()
+                    || v.extract::<(f64, f64, f64, f64)>().is_ok()
+                {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Normalize.{}: per-channel values are not supported. Normalize applies a \
+                         single scalar mean/std through a uint8 LUT (output stays in 0..255); pass \
+                         scalars like Normalize(mean=0.5, std=0.25). True per-channel float \
+                         normalization is not yet supported.",
+                        name
+                    )));
+                }
+            }
+        }
         let mean_dist = parse_dist_with_default(mean, 0.0)?;
         let std_dist = parse_dist_with_default(std, 1.0)?;
         if let Dist::Constant(v) = &std_dist {
@@ -949,13 +1002,14 @@ impl PyNormalize {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -965,7 +1019,7 @@ impl PyNormalize {
             mean: self.mean.clone(),
             std: self.std.clone(),
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -993,6 +1047,7 @@ impl PyNormalize {
 }
 
 /// ColorTint - apply color tint
+/// Tint the image toward a target color.
 #[cfg(feature = "python")]
 #[pyclass(name = "ColorTint")]
 pub struct PyColorTint {
@@ -1017,13 +1072,14 @@ impl PyColorTint {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -1032,7 +1088,7 @@ impl PyColorTint {
         let node = RandomImageNode::ColorTint {
             tint: self.tint.clone(),
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -1061,6 +1117,7 @@ impl PyColorTint {
 }
 
 /// CoarseDropout - dropout rectangular regions
+/// Drop rectangular regions (set to zero).
 #[cfg(feature = "python")]
 #[pyclass(name = "CoarseDropout")]
 pub struct PyCoarseDropout {
@@ -1105,13 +1162,14 @@ impl PyCoarseDropout {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -1121,7 +1179,7 @@ impl PyCoarseDropout {
             holes: self.holes.clone(),
             hole_size: self.hole_size.clone(),
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -1150,6 +1208,7 @@ impl PyCoarseDropout {
 }
 
 /// GridDropout - grid-based dropout
+/// Drop grid-aligned rectangular regions.
 #[cfg(feature = "python")]
 #[pyclass(name = "GridDropout")]
 pub struct PyGridDropout {
@@ -1181,13 +1240,14 @@ impl PyGridDropout {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -1198,7 +1258,7 @@ impl PyGridDropout {
             unit_size: self.unit_size.clone(),
             holes: self.holes.clone(),
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -1228,6 +1288,7 @@ impl PyGridDropout {
 }
 
 /// GaussianBlurSigma - Sigma-agnostic Gaussian blur
+/// Sigma-based Gaussian blur with exact or fast quality.
 #[cfg(feature = "python")]
 #[pyclass(name = "GaussianBlurSigma")]
 pub struct PyGaussianBlurSigma {
@@ -1259,20 +1320,21 @@ impl PyGaussianBlurSigma {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
         let node = RandomImageNode::GaussianBlurSigma { sigma: self.sigma };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -1297,6 +1359,7 @@ impl PyGaussianBlurSigma {
 }
 
 /// Emboss - emboss effect (blend-based)
+/// Emboss effect with a directional kernel and alpha/strength blend.
 #[cfg(feature = "python")]
 #[pyclass(name = "Emboss")]
 pub struct PyEmboss {
@@ -1332,13 +1395,14 @@ impl PyEmboss {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -1349,7 +1413,7 @@ impl PyEmboss {
             alpha: self.alpha.clone(),
             strength: self.strength.clone(),
         };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]
@@ -1389,6 +1453,7 @@ impl PyEmboss {
 }
 
 /// EdgeDetection - edge detection with various methods
+/// Edge detection (laplacian or sobel-style).
 #[cfg(feature = "python")]
 #[pyclass(name = "EdgeDetection")]
 pub struct PyEdgeDetection {
@@ -1413,20 +1478,21 @@ impl PyEdgeDetection {
         })
     }
 
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
         let node = RandomImageNode::EdgeDetection { method: self.method };
-        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, bbox_format, keypoint_format, inplace, py)
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
     }
 
     #[pyo3(signature = (array, inplace=None))]

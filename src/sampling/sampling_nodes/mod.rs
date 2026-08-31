@@ -131,7 +131,9 @@ pub enum RandomImageNode {
         std: Dist,
     },
     Equalize,
-    AutoContrast,
+    AutoContrast {
+        cutoff: Dist,
+    },
     ToGray,
     ToSepia,
     ToRGB,
@@ -403,10 +405,11 @@ impl RandomImageNode {
             RandomImageNode::Equalize => {
                 out.push(SampledImageOp::Equalize);
             }
-            RandomImageNode::AutoContrast => {
+            RandomImageNode::AutoContrast { cutoff } => {
+                let cutoff = cutoff.sample_f32(ctx.rng);
                 out.push(SampledImageOp::AutoContrast {
-                    cutoff_low: 0.0,
-                    cutoff_high: 1.0,
+                    cutoff_low: cutoff,
+                    cutoff_high: cutoff,
                 });
             }
             RandomImageNode::ToGray => {
@@ -639,7 +642,7 @@ impl RandomImageNode {
             | RandomImageNode::Gamma { .. }
             | RandomImageNode::Normalize { .. }
             | RandomImageNode::Equalize
-            | RandomImageNode::AutoContrast
+            | RandomImageNode::AutoContrast { .. }
             | RandomImageNode::ToGray
             | RandomImageNode::ToSepia => AccessPattern::InPlace,
 
@@ -708,7 +711,7 @@ impl RandomImageNode {
             | RandomImageNode::Gamma { .. }
             | RandomImageNode::Normalize { .. }
             | RandomImageNode::Equalize
-            | RandomImageNode::AutoContrast
+            | RandomImageNode::AutoContrast { .. }
             | RandomImageNode::ToGray
             | RandomImageNode::ToSepia
             | RandomImageNode::ToRGB

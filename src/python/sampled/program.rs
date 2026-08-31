@@ -5,12 +5,47 @@ use crate::exec_ir::Optimizer;
 use crate::sampled_ir::{Plan, SampledImageProgram, IR_VERSION};
 use crate::labels::{BBoxFormat, KeypointArray, KeypointFormat};
 
+/// Fail with a clean ValueError (instead of a Rust panic that pyo3 surfaces as
+/// a PanicException and kills DataLoader workers) when any Crop barrier in the
+/// optimized plan extends beyond the image.
+fn validate_crop_bounds(
+    exec_plan: &crate::exec_ir::ExecPlan,
+    width: usize,
+    height: usize,
+) -> PyResult<()> {
+    use crate::exec_ir::ExecNodeKind;
+    use crate::sampled_ir::ops::SampledImageOp;
+    for node in &exec_plan.nodes {
+        if let ExecNodeKind::Barrier(SampledImageOp::Crop {
+            x, y, width: w, height: h,
+        }) = &node.kind
+        {
+            let (x, y, w, h) = (*x as usize, *y as usize, *w as usize, *h as usize);
+            if x + w > width || y + h > height {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "crop region ({}, {}, {}x{}) exceeds image size ({}x{}); \
+                     sample x within [0, {}] and y within [0, {}]",
+                    x,
+                    y,
+                    w,
+                    h,
+                    width,
+                    height,
+                    width.saturating_sub(w),
+                    height.saturating_sub(h)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "python")]
 use numpy::{PyArray1, PyArray2, PyArray3};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "python")]
 use std::path::PathBuf;
 
@@ -19,12 +54,12 @@ use std::path::PathBuf;
 /// This is the output of the sampling phase and input to the optimizer.
 /// All parameters are fixed, all randomness resolved.
 ///
-/// # Internal API
+/// # API
 ///
-/// This is returned by `Compose.sample_with_seed()` and should not
-/// be constructed directly by users.
+/// This is returned by `Compose.sample_with_seed()` and represents a fully
+/// sampled, optimizable, serializable image transformation pipeline.
 #[cfg(feature = "python")]
-#[pyclass(name = "_SampledImageProgram")]
+#[pyclass(name = "SampledImageProgram")]
 pub struct PySampledImageProgram {
     pub inner: SampledImageProgram,
 }
@@ -32,6 +67,30 @@ pub struct PySampledImageProgram {
 #[cfg(feature = "python")]
 #[pymethods]
 impl PySampledImageProgram {
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SampledImageProgram(ops={})", self.inner.len())
+    }
+
+    fn __getitem__(&self, index: isize) -> PyResult<String> {
+        let len = self.inner.len() as isize;
+        let actual_idx = if index < 0 { len + index } else { index };
+        if actual_idx < 0 || actual_idx >= len {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>("Index out of bounds"));
+        }
+        let op = &self.inner.ops[actual_idx as usize];
+        Ok(format!("{:?}", op))
+    }
+
+    fn __iter__(slf: PyRef<Self>, py: Python) -> PyResult<PyObject> {
+        let ops_list: Vec<String> = slf.inner.iter().map(|op| format!("{:?}", op)).collect();
+        let list = PyList::new(py, ops_list);
+        list.call_method0("__iter__").map(|iter| iter.to_object(py))
+    }
+
     /// Number of operations in the program
     fn len(&self) -> usize {
         self.inner.len()
@@ -95,7 +154,7 @@ impl PySampledImageProgram {
     }
 
     /// Get a summary of the program
-    fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         self.inner.summary()
     }
 
@@ -181,7 +240,7 @@ impl PySampledImageProgram {
     /// sampled = pipeline.sample_with_seed(42)
     /// print(sampled.explain())
     /// ```
-    fn explain(&self) -> String {
+    pub(crate) fn explain(&self) -> String {
         use crate::exec_ir::ExecNodeKind;
         use crate::exec_ir::Optimizer;
         use crate::sampled_ir::Plan;
@@ -234,18 +293,6 @@ impl PySampledImageProgram {
         mermaid
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "_SampledImageProgram(version={}, ops={})",
-            self.inner.version,
-            self.inner.len()
-        )
-    }
-
-    fn __len__(&self) -> usize {
-        self.inner.len()
-    }
-
     fn __str__(&self) -> String {
         self.summary()
     }
@@ -263,13 +310,14 @@ impl PySampledImageProgram {
     ///
     /// # Returns
     /// Dictionary with keys: "image", and optionally "bboxes", "keypoints", "masks"
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
     pub(crate) fn __call__<'py>(
         &self,
         image: &'py PyAny,
-        bboxes: Option<&PyArray2<f32>>,
-        keypoints: Option<&PyArray2<f32>>,
-        masks: Option<&PyAny>,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
@@ -312,24 +360,71 @@ impl PySampledImageProgram {
             }
         };
 
-        if let Some(bbox_array) = bboxes {
+        if let Some(bbox_obj) = bboxes {
             let image_size = get_image_size()?;
-            let transformed_bboxes =
-                self.apply_to_bboxes(bbox_array, image_size, bbox_format, None, py)?;
-            result_dict.set_item("bboxes", transformed_bboxes)?;
+            let (bbox_array, is_torch, is_list) = extract_2d_coords(bbox_obj, 4, py)?;
+            if bbox_array.shape()[0] == 0 {
+                if is_list {
+                    result_dict.set_item("bboxes", PyList::empty(py))?;
+                } else if is_torch {
+                    let torch_mod = py.import("torch")?;
+                    let empty_tensor = torch_mod.call_method1("from_numpy", (bbox_array,))?;
+                    result_dict.set_item("bboxes", empty_tensor)?;
+                } else {
+                    result_dict.set_item("bboxes", bbox_array)?;
+                }
+            } else {
+                let transformed_bboxes =
+                    self.apply_to_bboxes(bbox_array, image_size, bbox_format, None, py)?;
+                if is_list {
+                    result_dict.set_item("bboxes", transformed_bboxes.call_method0("tolist")?)?;
+                } else if is_torch {
+                    let torch_mod = py.import("torch")?;
+                    let res_tensor = torch_mod.call_method1("from_numpy", (transformed_bboxes,))?;
+                    result_dict.set_item("bboxes", res_tensor)?;
+                } else {
+                    result_dict.set_item("bboxes", transformed_bboxes)?;
+                }
+            }
         }
 
-        if let Some(kpt_array) = keypoints {
+        if let Some(kpt_obj) = keypoints {
             let image_size = get_image_size()?;
-            let transformed_keypoints =
-                self.apply_to_keypoints(kpt_array, image_size, keypoint_format, None, py)?;
-            result_dict.set_item("keypoints", transformed_keypoints)?;
+            let (kpt_array, is_torch, is_list) = extract_2d_coords(kpt_obj, 2, py)?;
+            if kpt_array.shape()[0] == 0 {
+                if is_list {
+                    result_dict.set_item("keypoints", PyList::empty(py))?;
+                } else if is_torch {
+                    let torch_mod = py.import("torch")?;
+                    let empty_tensor = torch_mod.call_method1("from_numpy", (kpt_array,))?;
+                    result_dict.set_item("keypoints", empty_tensor)?;
+                } else {
+                    result_dict.set_item("keypoints", kpt_array)?;
+                }
+            } else {
+                let transformed_keypoints =
+                    self.apply_to_keypoints(kpt_array, image_size, keypoint_format, None, py)?;
+                if is_list {
+                    result_dict.set_item("keypoints", transformed_keypoints.call_method0("tolist")?)?;
+                } else if is_torch {
+                    let torch_mod = py.import("torch")?;
+                    let res_tensor = torch_mod.call_method1("from_numpy", (transformed_keypoints,))?;
+                    result_dict.set_item("keypoints", res_tensor)?;
+                } else {
+                    result_dict.set_item("keypoints", transformed_keypoints)?;
+                }
+            }
         }
 
-        if let Some(mask_array) = masks {
+        let mask_target = if masks.is_some() { masks } else { mask };
+        if let Some(mask_array) = mask_target {
             let image_size = get_image_size()?;
             let transformed_masks = self.apply_to_masks(mask_array, image_size, inplace, py)?;
-            result_dict.set_item("masks", transformed_masks)?;
+            if mask.is_some() && masks.is_none() {
+                result_dict.set_item("mask", transformed_masks)?;
+            } else {
+                result_dict.set_item("masks", transformed_masks)?;
+            }
         }
 
         Ok(result_dict.into())
@@ -358,6 +453,23 @@ impl PySampledImageProgram {
 
         use numpy::{PyArray2, PyArray3};
 
+        // CHW numpy guard: a 3D array whose first dim is a channel count and
+        // whose last dim is not is almost certainly channels-first. The HWC
+        // path would silently treat it as (H=channels, W, C=width) and corrupt
+        // the data, so fail loudly instead.
+        if let Ok(arr3) = array.downcast::<PyArray3<u8>>() {
+            let sh = arr3.shape();
+            let (h, w, c) = (sh[0], sh[1], sh[2]);
+            if (h == 1 || h == 3 || h == 4) && !(c == 1 || c == 3 || c == 4) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "detected channels-first numpy array with shape ({}, {}, {}); \
+                     sinter's numpy path expects (H, W, C). Pass a torch.Tensor \
+                     for CHW, or transpose with np.transpose(img, (1, 2, 0))",
+                    h, w, c
+                )));
+            }
+        }
+
         // Convert SampledImageProgram to Plan
         let plan = self.inner.to_plan();
 
@@ -375,6 +487,7 @@ impl PySampledImageProgram {
         if let Ok(array3) = working_array.downcast::<PyArray3<u8>>() {
             let shape = array3.shape();
             let (height, width, channels) = (shape[0] as usize, shape[1] as usize, shape[2] as usize);
+            validate_crop_bounds(&exec_plan, width, height)?;
             let slice = unsafe { array3.as_slice_mut()? };
             let mut fusable_img = FusableImage::new(slice, width, height, channels);
 
@@ -390,6 +503,7 @@ impl PySampledImageProgram {
         } else if let Ok(array2) = working_array.downcast::<PyArray2<u8>>() {
             let shape = array2.shape();
             let (height, width, channels) = (shape[0] as usize, shape[1] as usize, 1);
+            validate_crop_bounds(&exec_plan, width, height)?;
             let slice = unsafe { array2.as_slice_mut()? };
             let mut fusable_img = FusableImage::new(slice, width, height, channels);
 
@@ -511,6 +625,9 @@ impl PySampledImageProgram {
     }
 
     /// Apply the program to keypoints (zero-copy with format support)
+    ///
+    /// Supports N, core+ column arrays (extra payload columns such as class
+    /// ids or scores pass through unchanged, matching apply_to_bboxes).
     #[pyo3(signature = (keypoints, image_size, format="xy", format_out=None))]
     pub(crate) fn apply_to_keypoints<'py>(
         &self,
@@ -528,30 +645,43 @@ impl PySampledImageProgram {
             None => kpt_format,
         };
 
-        let slice = unsafe { keypoints.as_slice()? };
-        let kpt_array = KeypointArray::from_slice(slice, kpt_format, image_size.0, image_size.1)
-            .with_output_format(kpt_format_out);
+        let shape = keypoints.shape();
+        let num = shape[0] as usize;
+        let cols = shape[1] as usize;
+        let core = kpt_format.len();
 
-        let internal_kpts = kpt_array.to_vec_internal();
-        let visibilities: Vec<u8> = internal_kpts.iter().map(|&(_, _, v)| v).collect();
-        let xy_only: Vec<(f32, f32)> = internal_kpts.iter().map(|&(x, y, _)| (x, y)).collect();
+        if cols < core {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "keypoints must have at least {} columns for format '{}', got shape {:?}",
+                core, format, shape
+            )));
+        }
+
+        let slice = unsafe { keypoints.as_slice()? };
+        let mut with_extra = Vec::with_capacity(num);
+        for i in 0..num {
+            let row = &slice[i * cols..(i + 1) * cols];
+            let internal = kpt_format.to_internal(&row[..core], image_size.0, image_size.1);
+            let extra = row[core..].to_vec();
+            with_extra.push((internal, extra));
+        }
+
+        let xy_only: Vec<(f32, f32)> = with_extra.iter().map(|&((x, y, _), _)| (x, y)).collect();
+        let visibilities: Vec<u8> = with_extra.iter().map(|&((_, _, v), _)| v).collect();
         let (transformed_xy, (final_w, final_h)) =
             self.inner.apply_to_keypoints(xy_only, image_size);
 
-        let transformed: Vec<(f32, f32, u8)> = transformed_xy
-            .into_iter()
-            .zip(visibilities.into_iter())
-            .map(|((x, y), v)| (x, y, v))
-            .collect();
+        let out_cols = kpt_format_out.len() + cols.saturating_sub(core);
+        let mut output_flat = Vec::with_capacity(transformed_xy.len() * out_cols);
+        for (i, ((x, y), v)) in transformed_xy.into_iter().zip(visibilities.into_iter()).enumerate() {
+            let mut row = kpt_format_out.from_internal(x, y, v, final_w, final_h);
+            row.extend_from_slice(&with_extra[i].1);
+            output_flat.extend_from_slice(&row);
+        }
 
-        let owned = crate::labels::KeypointArrayOwned::from_internal(transformed, final_w, final_h)
-            .with_output_format(kpt_format_out);
-        let output = owned.to_output();
-        let out_stride = kpt_format_out.len();
-
-        let flat: Vec<f32> = output.iter().flatten().copied().collect();
-        let array1d = numpy::PyArray1::from_vec(py, flat);
-        let result = array1d.reshape((output.len(), out_stride)).map_err(|e| {
+        let out_count = if out_cols > 0 { output_flat.len() / out_cols } else { 0 };
+        let array1d = numpy::PyArray1::from_vec(py, output_flat);
+        let result = array1d.reshape((out_count, out_cols)).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Failed to reshape keypoints: {}",
                 e
@@ -669,15 +799,16 @@ impl PySampledImageProgram {
 
 /// Parse bbox format string
 fn parse_bbox_format(s: &str) -> PyResult<BBoxFormat> {
-    match s {
-        "xyxy" => Ok(BBoxFormat::Xyxy),
-        "xywh" => Ok(BBoxFormat::Xywh),
-        "cxcywh" => Ok(BBoxFormat::Cxcywh),
-        "rel_xyxy" => Ok(BBoxFormat::RelXyxy),
+    let clean = s.trim().to_lowercase().replace('-', "_");
+    match clean.as_str() {
+        "xyxy" | "pascal_voc" | "pascalvoc" => Ok(BBoxFormat::Xyxy),
+        "xywh" | "coco" => Ok(BBoxFormat::Xywh),
+        "cxcywh" | "center_xywh" => Ok(BBoxFormat::Cxcywh),
+        "rel_xyxy" | "albumentations" => Ok(BBoxFormat::RelXyxy),
         "rel_xywh" => Ok(BBoxFormat::RelXywh),
-        "rel_cxcywh" => Ok(BBoxFormat::RelCxcywh),
+        "rel_cxcywh" | "yolo" => Ok(BBoxFormat::RelCxcywh),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "Unknown bbox format: {}. Expected: xyxy, xywh, cxcywh, rel_xyxy, rel_xywh, rel_cxcywh",
+            "Unknown bbox format: '{}'. Supported formats: 'xyxy' ('pascal_voc'), 'xywh' ('coco'), 'cxcywh', 'rel_xyxy' ('albumentations'), 'rel_xywh', 'rel_cxcywh' ('yolo')",
             s
         ))),
     }
@@ -685,14 +816,62 @@ fn parse_bbox_format(s: &str) -> PyResult<BBoxFormat> {
 
 /// Parse keypoint format string
 fn parse_keypoint_format(s: &str) -> PyResult<KeypointFormat> {
-    match s {
+    let clean = s.trim().to_lowercase().replace('-', "_");
+    match clean.as_str() {
         "xy" => Ok(KeypointFormat::Xy),
-        "xyv" => Ok(KeypointFormat::Xyv),
+        "xyv" | "xy_visibility" => Ok(KeypointFormat::Xyv),
         "rel_xy" => Ok(KeypointFormat::RelXy),
         "rel_xyv" => Ok(KeypointFormat::RelXyv),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "Unknown keypoint format: {}. Expected: xy, xyv, rel_xy, rel_xyv",
+            "Unknown keypoint format: '{}'. Supported formats: 'xy', 'xyv', 'rel_xy', 'rel_xyv'",
             s
         ))),
     }
+}
+
+/// Extract 2D coordinate array from numpy ndarray, torch.Tensor, or Python list/sequence
+fn extract_2d_coords<'py>(
+    obj: &'py PyAny,
+    min_cols: usize,
+    py: Python<'py>,
+) -> PyResult<(&'py numpy::PyArray2<f32>, bool, bool)> {
+    if let Ok(arr) = obj.downcast::<numpy::PyArray2<f32>>() {
+        return Ok((arr, false, false));
+    }
+    if let Ok(arr) = obj.downcast::<numpy::PyArray2<f64>>() {
+        let np = py.import("numpy")?;
+        let f32_arr = np.call_method1("asarray", (arr, "float32"))?.downcast::<numpy::PyArray2<f32>>()?;
+        return Ok((f32_arr, false, false));
+    }
+    if let Ok(arr) = obj.downcast::<numpy::PyArray2<i64>>() {
+        let np = py.import("numpy")?;
+        let f32_arr = np.call_method1("asarray", (arr, "float32"))?.downcast::<numpy::PyArray2<f32>>()?;
+        return Ok((f32_arr, false, false));
+    }
+    if let Ok(arr) = obj.downcast::<numpy::PyArray2<i32>>() {
+        let np = py.import("numpy")?;
+        let f32_arr = np.call_method1("asarray", (arr, "float32"))?.downcast::<numpy::PyArray2<f32>>()?;
+        return Ok((f32_arr, false, false));
+    }
+    if crate::python::tensor::is_torch_tensor(obj) {
+        let np_obj = obj.call_method0("numpy")?;
+        let np = py.import("numpy")?;
+        let f32_arr = np.call_method1("asarray", (np_obj, "float32"))?.downcast::<numpy::PyArray2<f32>>()?;
+        return Ok((f32_arr, true, false));
+    }
+    if let Ok(seq) = obj.downcast::<pyo3::types::PySequence>() {
+        if seq.len()? == 0 {
+            let empty = numpy::PyArray2::<f32>::zeros(py, [0, min_cols], false);
+            return Ok((empty, false, true));
+        }
+        let np = py.import("numpy")?;
+        let arr_obj = np.call_method1("asarray", (obj, "float32"))?;
+        if let Ok(arr2) = arr_obj.downcast::<numpy::PyArray2<f32>>() {
+            return Ok((arr2, false, true));
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected 2D numpy array, torch.Tensor, or sequence of coordinates, got {}",
+        obj.get_type().name()?
+    )))
 }

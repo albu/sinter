@@ -174,9 +174,11 @@ impl SampledImageProgram {
 
         let mut out = String::new();
         out.push_str(&format!("flowchart {}\n", dir));
+        let ops_word = if num_ops == 1 { "transform" } else { "transforms" };
+        let nodes_word = if num_nodes == 1 { "execution node" } else { "execution nodes" };
         out.push_str(&format!(
-            "    %% Optimization: {} transforms -> {} execution nodes ({}% fusion)\n",
-            num_ops, num_nodes, fusion_pct
+            "    %% Optimization: {} {} -> {} {} ({}% fusion)\n",
+            num_ops, ops_word, num_nodes, nodes_word, fusion_pct
         ));
         out.push_str("    Input([\"Input Image\"])\n");
 

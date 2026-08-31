@@ -643,9 +643,8 @@ class Equalize:
 
 class AutoContrast:
     """Maximize image contrast by stretching histogram."""
-    cutoff: float
     p: DistInput
-    def __init__(self, cutoff: float = 0.0, p: Optional[DistInput] = None) -> None: ...
+    def __init__(self, p: Optional[DistInput] = None) -> None: ...
     def __call__(
         self,
         image: np.ndarray,

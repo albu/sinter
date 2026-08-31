@@ -329,13 +329,94 @@ class TestExtraColumnBoundingBoxes:
 
 
 class TestContainerProtocol:
-    """Test Compose container operations."""
+    """Test Compose and SampledImageProgram container operations and human ergonomics."""
 
-    def test_len(self):
+    def test_len_and_repr(self):
         pipeline = Compose([
             Brightness(),
             Contrast(),
             HorizontalFlip(),
         ])
         assert len(pipeline) == 3
-        assert repr(pipeline) == "Compose(num_transforms=3)"
+        r = repr(pipeline)
+        assert "Brightness" in r
+        assert "Contrast" in r
+        assert "HorizontalFlip" in r
+
+    def test_indexing_and_iteration(self):
+        t1 = Brightness(delta=10)
+        t2 = Contrast(factor=1.2)
+        t3 = HorizontalFlip()
+        pipeline = Compose([t1, t2, t3])
+
+        assert len(pipeline) == 3
+        assert "Brightness" in repr(pipeline[0])
+        assert "Contrast" in repr(pipeline[1])
+        assert "HorizontalFlip" in repr(pipeline[-1])
+
+        collected = [repr(t) for t in pipeline]
+        assert len(collected) == 3
+
+    def test_direct_explain_and_summary(self):
+        pipeline = Compose([
+            Brightness(delta=10),
+            Contrast(factor=1.2),
+            HorizontalFlip(),
+        ])
+        explanation = pipeline.explain()
+        assert "Execution Plan:" in explanation
+        assert len(pipeline.summary()) > 0
+
+    def test_mask_singular_alias(self):
+        pipeline = Compose([HorizontalFlip()])
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[10:20, 10:20] = 1
+
+        # Calling with mask (singular) returns dict with 'mask'
+        res = pipeline(image=img, mask=mask)
+        assert "mask" in res
+        assert "masks" not in res
+        assert res["mask"].shape == (100, 100)
+
+        # Calling with masks (plural) returns dict with 'masks'
+        res_plural = pipeline(image=img, masks=mask)
+        assert "masks" in res_plural
+        assert "mask" not in res_plural
+
+    def test_bbox_aliases(self):
+        pipeline = Compose([HorizontalFlip()])
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        # Absolute formats
+        for fmt in ["xywh", "coco", "xyxy", "pascal_voc"]:
+            res = pipeline(img, bboxes=[[10.0, 20.0, 30.0, 40.0]], bbox_format=fmt)
+            assert "bboxes" in res
+            assert len(res["bboxes"]) == 1
+
+        # Center format
+        res = pipeline(img, bboxes=[[50.0, 50.0, 30.0, 40.0]], bbox_format="cxcywh")
+        assert "bboxes" in res
+        assert len(res["bboxes"]) == 1
+
+        # Relative formats in [0, 1]
+        for fmt in ["rel_xyxy", "albumentations", "rel_cxcywh", "yolo", "rel_xywh"]:
+            res = pipeline(img, bboxes=[[0.5, 0.5, 0.2, 0.2]], bbox_format=fmt)
+            assert "bboxes" in res
+            assert len(res["bboxes"]) == 1
+
+    def test_python_list_and_empty_bboxes_keypoints(self):
+        pipeline = Compose([HorizontalFlip()])
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        # Python list bboxes
+        res = pipeline(img, bboxes=[[10, 20, 30, 40]], bbox_format="xywh")
+        assert isinstance(res["bboxes"], list)
+        assert res["bboxes"][0][0] == 60.0
+
+        # Empty python list bboxes
+        res_empty = pipeline(img, bboxes=[], keypoints=[])
+        assert isinstance(res_empty["bboxes"], list)
+        assert len(res_empty["bboxes"]) == 0
+        assert isinstance(res_empty["keypoints"], list)
+        assert len(res_empty["keypoints"]) == 0

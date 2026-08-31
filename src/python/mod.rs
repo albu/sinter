@@ -68,6 +68,7 @@ use tensor::apply_to_tensor_inplace;
 /// Python module for sinter
 #[pymodule]
 fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     // Distribution types
     register_classes!(
@@ -156,7 +157,7 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
 
     // Sampled IR
     m.add_class::<PySampledImageProgram>()?;
-    m.add("SampledImageProgram", m.getattr("_SampledImageProgram")?)?;
+    m.add("_SampledImageProgram", m.getattr("SampledImageProgram")?)?;
 
     // Batch transforms
     register_classes!(m, PyMixUp, PyCutMix, PyMosaic, PyBatchPipeline,);
