@@ -312,6 +312,26 @@ def benchmark_geometric_grayscale():
     print(f"  → Sinter is {t_opencv/t_sinter:.2f}x faster than OpenCV")
 
     # ========================================================================
+    # 8c. Affine — rotate 45° + shear 5° (largest y-span: 8-row window)
+    # ========================================================================
+    print("\n8c. Affine rotate 45° + shear 5° (bilinear → 512x512)")
+    print("-" * 80)
+
+    M_inv_shear = sinter_inverse_matrix((1.3, 1.3), rotate_deg=45.0, shear=(5.0, -5.0),
+                                        w=size[0], h=size[1])
+
+    t_opencv = timeit_min(lambda x: cv_affine(x, M_inv_shear), img_gray, iterations)
+    print(f"  OpenCV warpAffine: {t_opencv:.4f} ms")
+
+    pipe_shear = Compose([Affine(scale=(1.3, 1.3), rotate=45.0, shear=(5.0, -5.0),
+                                 interpolation=Interpolation.BILINEAR)])
+    assert_same_shape(pipe_shear.apply(img_gray.copy()), cv_affine(img_gray.copy(), M_inv_shear),
+                      "affine rotate+shear")
+    t_sinter = timeit_min(pipe_shear.apply, img_gray, iterations)
+    print(f"  Sinter affine:     {t_sinter:.4f} ms")
+    print(f"  → Sinter is {t_opencv/t_sinter:.2f}x faster than OpenCV")
+
+    # ========================================================================
     # 9. Pipeline: FlipH + FlipV (should compose to Rot180)
     # ========================================================================
     print("\n9. Pipeline: FlipH + FlipV (geometric composition → Rot180)")

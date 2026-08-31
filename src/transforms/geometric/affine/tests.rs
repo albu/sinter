@@ -78,6 +78,14 @@ fn test_affine_gray_bilinear_neon_matches_scalar_reference() {
         AffineParams { scale: (2.0, 2.0), rotate: 75.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
         // General path: rotation + shear mix
         AffineParams { scale: (1.3, 1.3), rotate: 45.0, translate: (0.0, 0.0), shear: (5.0, -5.0) },
+        // General path: heavier shear (y span 5..6 per 8 px -> 8-row window)
+        AffineParams { scale: (1.3, 1.3), rotate: 45.0, translate: (0.0, 0.0), shear: (15.0, -15.0) },
+        // General path: steep rotation + shear (y span ~6, max window row)
+        AffineParams { scale: (1.3, 1.3), rotate: 75.0, translate: (0.0, 0.0), shear: (20.0, -20.0) },
+        // General path: negative rotation (dy_fp < 0 exercises the mirrored window)
+        AffineParams { scale: (1.3, 1.3), rotate: -45.0, translate: (0.0, 0.0), shear: (5.0, 10.0) },
+        // General path: x-shear only (dy_fp from rotation term, dx_fp large)
+        AffineParams { scale: (1.0, 1.0), rotate: 30.0, translate: (0.0, 0.0), shear: (20.0, 0.0) },
         // General path: x-mirror (dx_fp < 0)
         AffineParams { scale: (-1.0, 1.0), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
         // Zoom-out that drifts > 14 source pixels per 8 output pixels (scalar

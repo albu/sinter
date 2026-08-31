@@ -125,10 +125,10 @@ These benchmarks demonstrate specific fusion strategies:
 - These tables are **vs albumentations**. Against raw cv2 (single-threaded, matched shapes)
   the picture differs: sinter wins multi-pass/large-kernel Gaussian by 15–69× and most
   LUT/matrix/geometric RGB ops, and is at/near parity on gray Transpose/Rot90 (~0.95×) and
-  affine scale (~1.0×) and rotate+scale (~1.3×). It still trails cv2 on single-pass
-  Gaussian 5×5 (~0.8×), gray VerticalFlip (~0.8×), affine with strong shear (~0.44×), and
-  MedianBlur (RGB 0.6–0.8×, gray ~0.4×). See `python/benchmarks/benchmark_gaussian_blur.py`
-  and `python/benchmarks/benchmark_geometric_grayscale.py`.
+  affine (scale ~1.0×, rotate+scale ~1.25×, rotate+shear ~0.96×). It still trails cv2 on
+  single-pass Gaussian 5×5 (~0.8×), gray VerticalFlip (~0.8×), and MedianBlur
+  (RGB 0.6–0.8×, gray ~0.4×). See `python/benchmarks/benchmark_gaussian_blur.py` and
+  `python/benchmarks/benchmark_geometric_grayscale.py`.
 
 See `python/benchmarks/benchmark_fusion.py` for the fusion benchmark suite.
 

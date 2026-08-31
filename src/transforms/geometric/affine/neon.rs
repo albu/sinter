@@ -568,11 +568,13 @@ fn gray_bilinear_pixel(
 /// Try to compute an 8-pixel bilinear block for the general affine path.
 ///
 /// Writes 8 output pixels and returns true when every lane is interior and the
-/// block's source corners fit a 4x16-byte window table:
+/// block's source corners fit a 4- or 8-row window table:
 ///   - all corners strictly inside (x0 < w-1, y0 < h-1) so no border sampling,
 ///   - x span <= 13 (so a corner's +1 column stays inside a table row),
-///   - y span <= 2 (so a corner's +1 row stays inside the 4-row table),
-///   - a 16-byte load at (min_x0, min_y0..min_y0+3) stays in bounds.
+///   - y span <= 6 (so a corner's +1 row stays inside the 8-row table;
+///     spans <= 2 use the cheaper 4-row table, spans 3..6 use two 4-row
+///     tables with a per-lane select),
+///   - a 16-byte load at (min_x0, min_y0..min_y0+7) stays in bounds.
 /// Returns false writing nothing otherwise; the caller falls back to
 /// gray_bilinear_pixel, so the combined path stays bit-exact with the scalar
 /// reference (identical corners, weights, `(sum + 32768) >> 16` rounding).
@@ -619,13 +621,13 @@ unsafe fn affine_gray_block8(
         || max_y0 >= in_height as i32 - 1
         || min_x0 + 16 > in_width as i32
         || max_x0 - min_x0 > 13
-        || max_y0 - min_y0 > 2
-        || min_y0 + 4 > in_height as i32
+        || max_y0 - min_y0 > 6
+        || min_y0 + 8 > in_height as i32
     {
         return false;
     }
 
-    // Per-lane window table index: (y0 - min_y0)*16 + (x0 - min_x0) <= 2*16+13.
+    // Per-lane window table index: (y0 - min_y0)*16 + (x0 - min_x0).
     let xr16 = vcombine_u16(
         vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(x0_lo, vdupq_n_s32(min_x0)))),
         vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(x0_hi, vdupq_n_s32(min_x0)))),
@@ -636,21 +638,66 @@ unsafe fn affine_gray_block8(
     );
     let idx16 = vmlaq_u16(xr16, yr16, vdupq_n_u16(16));
     let idx8 = vqmovn_u16(idx16);
-    let idx8_p1 = vadd_u8(idx8, vdup_n_u8(1));
-    let idx8_p16 = vadd_u8(idx8, vdup_n_u8(16));
-    let idx8_p17 = vadd_u8(idx8, vdup_n_u8(17));
 
     let base = data.as_ptr().add(min_y0 as usize * in_width + min_x0 as usize);
-    let t0 = vld1q_u8(base);
-    let t1 = vld1q_u8(base.add(in_width));
-    let t2 = vld1q_u8(base.add(2 * in_width));
-    let t3 = vld1q_u8(base.add(3 * in_width));
+    let one = vdup_n_u8(1);
+    let s16 = vdup_n_u8(16);
+    let s17 = vdup_n_u8(17);
 
-    let tbl = uint8x16x4_t(t0, t1, t2, t3);
-    let p00 = vqtbl4_u8(tbl, idx8);
-    let p10 = vqtbl4_u8(tbl, idx8_p1);
-    let p01 = vqtbl4_u8(tbl, idx8_p16);
-    let p11 = vqtbl4_u8(tbl, idx8_p17);
+    let (p00, p10, p01, p11) = if max_y0 - min_y0 <= 2 {
+        // 4-row window: rows min_y0..min_y0+3.
+        let t0 = vld1q_u8(base);
+        let t1 = vld1q_u8(base.add(in_width));
+        let t2 = vld1q_u8(base.add(2 * in_width));
+        let t3 = vld1q_u8(base.add(3 * in_width));
+        let tbl = uint8x16x4_t(t0, t1, t2, t3);
+        (
+            vqtbl4_u8(tbl, idx8),
+            vqtbl4_u8(tbl, vadd_u8(idx8, one)),
+            vqtbl4_u8(tbl, vadd_u8(idx8, s16)),
+            vqtbl4_u8(tbl, vadd_u8(idx8, s17)),
+        )
+    } else {
+        // 8-row window: rows min_y0..min_y0+7 split across two 4-row tables.
+        // Lane row r = yr16. Row r lives in tbl0 for r <= 3 and tbl1 for
+        // r >= 4 (index idx16 - 64 = (r-4)*16 + c); row r+1 crosses into tbl1
+        // one row earlier (r >= 3), so it needs its own index idx16 - 48 =
+        // (r-3)*16 + c. Indices that wrap (r below the threshold) saturate to
+        // 255 through vqmovn and gather 0, then are discarded by the select,
+        // so the math is unchanged for every lane.
+        let t0 = vld1q_u8(base);
+        let t1 = vld1q_u8(base.add(in_width));
+        let t2 = vld1q_u8(base.add(2 * in_width));
+        let t3 = vld1q_u8(base.add(3 * in_width));
+        let t4 = vld1q_u8(base.add(4 * in_width));
+        let t5 = vld1q_u8(base.add(5 * in_width));
+        let t6 = vld1q_u8(base.add(6 * in_width));
+        let t7 = vld1q_u8(base.add(7 * in_width));
+        let tbl0 = uint8x16x4_t(t0, t1, t2, t3);
+        let tbl1 = uint8x16x4_t(t4, t5, t6, t7);
+        let idx1_8 = vqmovn_u16(vsubq_u16(idx16, vdupq_n_u16(64)));
+        let idx1r1_8 = vqmovn_u16(vsubq_u16(idx16, vdupq_n_u16(48)));
+        let mask_r = vqmovn_u16(vcgeq_u16(yr16, vdupq_n_u16(4)));
+        let mask_r1 = vqmovn_u16(vcgeq_u16(yr16, vdupq_n_u16(3)));
+        (
+            vbsl_u8(mask_r, vqtbl4_u8(tbl1, idx1_8), vqtbl4_u8(tbl0, idx8)),
+            vbsl_u8(
+                mask_r,
+                vqtbl4_u8(tbl1, vadd_u8(idx1_8, one)),
+                vqtbl4_u8(tbl0, vadd_u8(idx8, one)),
+            ),
+            vbsl_u8(
+                mask_r1,
+                vqtbl4_u8(tbl1, idx1r1_8),
+                vqtbl4_u8(tbl0, vadd_u8(idx8, s16)),
+            ),
+            vbsl_u8(
+                mask_r1,
+                vqtbl4_u8(tbl1, vadd_u8(idx1r1_8, one)),
+                vqtbl4_u8(tbl0, vadd_u8(idx8, s17)),
+            ),
+        )
+    };
 
     // Fractional parts: (fp >> 8) & 0xFF per lane.
     let fx16 = vcombine_u16(
