@@ -539,6 +539,514 @@ impl PyChannelShuffle {
     }
 }
 
+fn parse_hsv_scale_dist(val: &PyAny, is_shift: bool) -> PyResult<Dist> {
+    let dist = parse_distribution(val)?;
+    if is_shift {
+        match dist {
+            Dist::Constant(v) => {
+                let scale = if v.abs() > 1.0 { 1.0 + v / 255.0 } else { 1.0 + v };
+                Ok(Dist::constant(scale.max(0.0)))
+            }
+            Dist::Uniform { min, max } => {
+                let s_min = if min.abs() > 1.0 || max.abs() > 1.0 { 1.0 + min / 255.0 } else { 1.0 + min };
+                let s_max = if min.abs() > 1.0 || max.abs() > 1.0 { 1.0 + max / 255.0 } else { 1.0 + max };
+                Ok(Dist::uniform(s_min.max(0.0), s_max.max(0.0)))
+            }
+            Dist::Normal { mu, sigma } => {
+                let s_mu = if mu.abs() > 1.0 || sigma > 1.0 { 1.0 + mu / 255.0 } else { 1.0 + mu };
+                let s_sigma = if mu.abs() > 1.0 || sigma > 1.0 { sigma / 255.0 } else { sigma };
+                Ok(Dist::normal(s_mu.max(0.0), s_sigma))
+            }
+            Dist::UniformInt { min, max } => {
+                let s_min = 1.0 + (min as f32) / 255.0;
+                let s_max = 1.0 + (max as f32) / 255.0;
+                Ok(Dist::uniform(s_min.max(0.0), s_max.max(0.0)))
+            }
+            _ => Ok(dist),
+        }
+    } else {
+        match dist {
+            Dist::Uniform { min, max } if min < 0.0 => {
+                let s_min = if min.abs() > 1.0 || max.abs() > 1.0 { 1.0 + min / 255.0 } else { 1.0 + min };
+                let s_max = if min.abs() > 1.0 || max.abs() > 1.0 { 1.0 + max / 255.0 } else { 1.0 + max };
+                Ok(Dist::uniform(s_min.max(0.0), s_max.max(0.0)))
+            }
+            _ => Ok(dist),
+        }
+    }
+}
+
+/// HueSaturationValue - adjust hue, saturation, and value
+#[cfg(feature = "python")]
+#[pyclass(name = "HueSaturationValue")]
+pub struct PyHueSaturationValue {
+    pub hue_shift: Dist,
+    pub saturation_scale: Dist,
+    pub value_scale: Dist,
+    pub p: Dist,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyHueSaturationValue {
+    #[new]
+    #[pyo3(signature = (
+        hue_shift=None,
+        saturation_scale=None,
+        value_scale=None,
+        hue_shift_limit=None,
+        sat_shift_limit=None,
+        val_shift_limit=None,
+        sat_shift=None,
+        val_shift=None,
+        hue=None,
+        sat=None,
+        val=None,
+        p=None
+    ))]
+    fn new(
+        hue_shift: Option<&PyAny>,
+        saturation_scale: Option<&PyAny>,
+        value_scale: Option<&PyAny>,
+        hue_shift_limit: Option<&PyAny>,
+        sat_shift_limit: Option<&PyAny>,
+        val_shift_limit: Option<&PyAny>,
+        sat_shift: Option<&PyAny>,
+        val_shift: Option<&PyAny>,
+        hue: Option<&PyAny>,
+        sat: Option<&PyAny>,
+        val: Option<&PyAny>,
+        p: Option<&PyAny>,
+    ) -> PyResult<Self> {
+        let h = hue_shift
+            .or(hue_shift_limit)
+            .or(hue);
+        let s = saturation_scale
+            .or(sat_shift_limit)
+            .or(sat_shift)
+            .or(sat);
+        let v = value_scale
+            .or(val_shift_limit)
+            .or(val_shift)
+            .or(val);
+
+        let h_dist = match h {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+        let is_s_shift = sat_shift_limit.is_some() || sat_shift.is_some();
+        let is_v_shift = val_shift_limit.is_some() || val_shift.is_some();
+
+        let s_dist = match s {
+            Some(val) => parse_hsv_scale_dist(val, is_s_shift)?,
+            None => Dist::constant(1.0),
+        };
+        let v_dist = match v {
+            Some(val) => parse_hsv_scale_dist(val, is_v_shift)?,
+            None => Dist::constant(1.0),
+        };
+
+        Ok(Self {
+            hue_shift: h_dist,
+            saturation_scale: s_dist,
+            value_scale: v_dist,
+            p: parse_p_dist(p)?,
+        })
+    }
+
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    fn __call__<'py>(
+        &self,
+        image: &'py PyAny,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
+        bbox_format: &str,
+        keypoint_format: &str,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<PyObject> {
+        let node = RandomImageNode::HueSaturationValue {
+            hue_shift: self.hue_shift.clone(),
+            saturation_scale: self.saturation_scale.clone(),
+            value_scale: self.value_scale.clone(),
+        };
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
+    }
+
+    #[pyo3(signature = (array, inplace=None))]
+    fn apply<'py>(
+        &self,
+        array: &'py PyAny,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let node = RandomImageNode::HueSaturationValue {
+            hue_shift: self.hue_shift.clone(),
+            saturation_scale: self.saturation_scale.clone(),
+            value_scale: self.value_scale.clone(),
+        };
+        apply_node_to_image(node, self.p.clone(), array, inplace, py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HueSaturationValue(hue_shift={}, saturation_scale={}, value_scale={}, p={})",
+            format_dist(&self.hue_shift),
+            format_dist(&self.saturation_scale),
+            format_dist(&self.value_scale),
+            format_dist(&self.p)
+        )
+    }
+}
+
+/// RGBShift - shift each RGB channel
+#[cfg(feature = "python")]
+#[pyclass(name = "RGBShift")]
+pub struct PyRGBShift {
+    pub r_shift: Dist,
+    pub g_shift: Dist,
+    pub b_shift: Dist,
+    pub p: Dist,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyRGBShift {
+    #[new]
+    #[pyo3(signature = (
+        r_shift=None,
+        g_shift=None,
+        b_shift=None,
+        r_shift_limit=None,
+        g_shift_limit=None,
+        b_shift_limit=None,
+        r=None,
+        g=None,
+        b=None,
+        p=None
+    ))]
+    fn new(
+        r_shift: Option<&PyAny>,
+        g_shift: Option<&PyAny>,
+        b_shift: Option<&PyAny>,
+        r_shift_limit: Option<&PyAny>,
+        g_shift_limit: Option<&PyAny>,
+        b_shift_limit: Option<&PyAny>,
+        r: Option<&PyAny>,
+        g: Option<&PyAny>,
+        b: Option<&PyAny>,
+        p: Option<&PyAny>,
+    ) -> PyResult<Self> {
+        let r_in = r_shift.or(r_shift_limit).or(r);
+        let g_in = g_shift.or(g_shift_limit).or(g);
+        let b_in = b_shift.or(b_shift_limit).or(b);
+
+        let r_dist = match r_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+        let g_dist = match g_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+        let b_dist = match b_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+
+        Ok(Self {
+            r_shift: r_dist,
+            g_shift: g_dist,
+            b_shift: b_dist,
+            p: parse_p_dist(p)?,
+        })
+    }
+
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    fn __call__<'py>(
+        &self,
+        image: &'py PyAny,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
+        bbox_format: &str,
+        keypoint_format: &str,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<PyObject> {
+        let node = RandomImageNode::RGBShift {
+            r_shift: self.r_shift.clone(),
+            g_shift: self.g_shift.clone(),
+            b_shift: self.b_shift.clone(),
+        };
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
+    }
+
+    #[pyo3(signature = (array, inplace=None))]
+    fn apply<'py>(
+        &self,
+        array: &'py PyAny,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let node = RandomImageNode::RGBShift {
+            r_shift: self.r_shift.clone(),
+            g_shift: self.g_shift.clone(),
+            b_shift: self.b_shift.clone(),
+        };
+        apply_node_to_image(node, self.p.clone(), array, inplace, py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RGBShift(r_shift={}, g_shift={}, b_shift={}, p={})",
+            format_dist(&self.r_shift),
+            format_dist(&self.g_shift),
+            format_dist(&self.b_shift),
+            format_dist(&self.p)
+        )
+    }
+}
+
+/// GaussNoise - add Gaussian noise
+#[cfg(feature = "python")]
+#[pyclass(name = "GaussNoise")]
+pub struct PyGaussNoise {
+    pub mean: Dist,
+    pub std: Dist,
+    pub p: Dist,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyGaussNoise {
+    #[new]
+    #[pyo3(signature = (
+        mean=None,
+        std=None,
+        mu=None,
+        sigma=None,
+        var_limit=None,
+        p=None
+    ))]
+    fn new(
+        mean: Option<&PyAny>,
+        std: Option<&PyAny>,
+        mu: Option<&PyAny>,
+        sigma: Option<&PyAny>,
+        var_limit: Option<&PyAny>,
+        p: Option<&PyAny>,
+    ) -> PyResult<Self> {
+        let mean_in = mean.or(mu);
+        let std_in = std.or(sigma);
+
+        let mean_dist = match mean_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+
+        let std_dist = if let Some(val) = std_in {
+            parse_distribution(val)?
+        } else if let Some(vl) = var_limit {
+            if let Ok((min_v, max_v)) = vl.extract::<(f32, f32)>() {
+                Dist::uniform(min_v.max(0.0).sqrt(), max_v.max(0.0).sqrt())
+            } else if let Ok(v) = vl.extract::<f32>() {
+                Dist::uniform(0.0, v.max(0.0).sqrt())
+            } else {
+                parse_distribution(vl)?
+            }
+        } else {
+            Dist::constant(10.0)
+        };
+
+        Ok(Self {
+            mean: mean_dist,
+            std: std_dist,
+            p: parse_p_dist(p)?,
+        })
+    }
+
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    fn __call__<'py>(
+        &self,
+        image: &'py PyAny,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
+        bbox_format: &str,
+        keypoint_format: &str,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<PyObject> {
+        let node = RandomImageNode::GaussNoise {
+            mean: self.mean.clone(),
+            std: self.std.clone(),
+        };
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
+    }
+
+    #[pyo3(signature = (array, inplace=None))]
+    fn apply<'py>(
+        &self,
+        array: &'py PyAny,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let node = RandomImageNode::GaussNoise {
+            mean: self.mean.clone(),
+            std: self.std.clone(),
+        };
+        apply_node_to_image(node, self.p.clone(), array, inplace, py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GaussNoise(mean={}, std={}, p={})",
+            format_dist(&self.mean),
+            format_dist(&self.std),
+            format_dist(&self.p)
+        )
+    }
+}
+
+/// Crop - crop a rectangular region
+#[cfg(feature = "python")]
+#[pyclass(name = "Crop")]
+pub struct PyCrop {
+    pub x: Dist,
+    pub y: Dist,
+    pub width: Dist,
+    pub height: Dist,
+    pub p: Dist,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyCrop {
+    #[new]
+    #[pyo3(signature = (
+        x=None,
+        y=None,
+        width=None,
+        height=None,
+        x_min=None,
+        y_min=None,
+        x_max=None,
+        y_max=None,
+        w=None,
+        h=None,
+        p=None
+    ))]
+    fn new(
+        x: Option<&PyAny>,
+        y: Option<&PyAny>,
+        width: Option<&PyAny>,
+        height: Option<&PyAny>,
+        x_min: Option<&PyAny>,
+        y_min: Option<&PyAny>,
+        x_max: Option<&PyAny>,
+        y_max: Option<&PyAny>,
+        w: Option<&PyAny>,
+        h: Option<&PyAny>,
+        p: Option<&PyAny>,
+    ) -> PyResult<Self> {
+        let x_in = x.or(x_min);
+        let y_in = y.or(y_min);
+        let w_in = width.or(w);
+        let h_in = height.or(h);
+
+        let x_dist = match x_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+        let y_dist = match y_in {
+            Some(val) => parse_distribution(val)?,
+            None => Dist::constant(0.0),
+        };
+
+        let width_dist = if let Some(val) = w_in {
+            parse_distribution(val)?
+        } else if let (Some(xmin), Some(xmax)) = (x_min, x_max) {
+            let x0 = xmin.extract::<f32>().unwrap_or(0.0);
+            let x1 = xmax.extract::<f32>().unwrap_or(100.0);
+            Dist::constant((x1 - x0).max(1.0))
+        } else {
+            Dist::constant(100.0)
+        };
+
+        let height_dist = if let Some(val) = h_in {
+            parse_distribution(val)?
+        } else if let (Some(ymin), Some(ymax)) = (y_min, y_max) {
+            let y0 = ymin.extract::<f32>().unwrap_or(0.0);
+            let y1 = ymax.extract::<f32>().unwrap_or(100.0);
+            Dist::constant((y1 - y0).max(1.0))
+        } else {
+            Dist::constant(100.0)
+        };
+
+        Ok(Self {
+            x: x_dist,
+            y: y_dist,
+            width: width_dist,
+            height: height_dist,
+            p: parse_p_dist(p)?,
+        })
+    }
+
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    fn __call__<'py>(
+        &self,
+        image: &'py PyAny,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
+        bbox_format: &str,
+        keypoint_format: &str,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<PyObject> {
+        let node = RandomImageNode::Crop {
+            x: self.x.clone(),
+            y: self.y.clone(),
+            width: self.width.clone(),
+            height: self.height.clone(),
+        };
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
+    }
+
+    #[pyo3(signature = (array, inplace=None))]
+    fn apply<'py>(
+        &self,
+        array: &'py PyAny,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let node = RandomImageNode::Crop {
+            x: self.x.clone(),
+            y: self.y.clone(),
+            width: self.width.clone(),
+            height: self.height.clone(),
+        };
+        apply_node_to_image(node, self.p.clone(), array, inplace, py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Crop(x={}, y={}, width={}, height={}, p={})",
+            format_dist(&self.x),
+            format_dist(&self.y),
+            format_dist(&self.width),
+            format_dist(&self.height),
+            format_dist(&self.p)
+        )
+    }
+}
+
 // ============================================================================
 // Manual Transform Classes
 // ============================================================================
@@ -1614,6 +2122,26 @@ pub(crate) fn extract_node(item: &PyAny) -> PyResult<RandomImageNode> {
             direction: obj.direction,
             alpha: obj.alpha.clone(),
             strength: obj.strength.clone(),
+        },
+        PyHueSaturationValue => |obj: &PyHueSaturationValue| RandomImageNode::HueSaturationValue {
+            hue_shift: obj.hue_shift.clone(),
+            saturation_scale: obj.saturation_scale.clone(),
+            value_scale: obj.value_scale.clone(),
+        },
+        PyRGBShift => |obj: &PyRGBShift| RandomImageNode::RGBShift {
+            r_shift: obj.r_shift.clone(),
+            g_shift: obj.g_shift.clone(),
+            b_shift: obj.b_shift.clone(),
+        },
+        PyGaussNoise => |obj: &PyGaussNoise| RandomImageNode::GaussNoise {
+            mean: obj.mean.clone(),
+            std: obj.std.clone(),
+        },
+        PyCrop => |obj: &PyCrop| RandomImageNode::Crop {
+            x: obj.x.clone(),
+            y: obj.y.clone(),
+            width: obj.width.clone(),
+            height: obj.height.clone(),
         },
         PyEdgeDetection => |obj: &PyEdgeDetection| RandomImageNode::EdgeDetection {
             method: obj.method,

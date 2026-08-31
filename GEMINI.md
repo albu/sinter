@@ -97,23 +97,40 @@ python python/benchmarks/benchmark_fusion.py
 
 Python usage:
 ```python
-from sinter import Compose, Brightness, Contrast, Uniform, Constant
+from sinter import Compose, Brightness, Contrast, Uniform, Constant, HorizontalFlip, Resize
 import numpy as np
+import torch
 
 # Create a pipeline with distribution support
 pipeline = Compose([
+    HorizontalFlip(p=0.5),
     Brightness(delta=Uniform(-30.0, 30.0)),
     Contrast(factor=Constant(1.2)),
+    Resize(width=256, height=256),
 ])
 
-# Apply directly to numpy arrays
-img_array = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
-result = pipeline.apply(img_array.copy())
+# Multi-target call (supports numpy arrays, PyTorch tensors, Python lists for bboxes/keypoints)
+img = np.random.randint(0, 255, (300, 300, 3), dtype=np.uint8)
+mask = np.zeros((300, 300), dtype=np.uint8)
+boxes = [[10, 20, 50, 60, 1]]
 
-# Sample once for deterministic reuse
-sampled = pipeline.sample_with_seed(42)
-result1 = sampled.apply(img1.copy())
-result2 = sampled.apply(img2.copy())
+res = pipeline(image=img, mask=mask, bboxes=boxes, bbox_format="coco")
+out_img = res["image"]
+out_mask = res["mask"]
+out_boxes = res["bboxes"]
+
+# Multi-core batch processing (Rayon + GIL release)
+batch = torch.randint(0, 255, (16, 3, 256, 256), dtype=torch.uint8)
+out_batch = pipeline.apply_batch(batch, num_threads=4)
+
+# Sample once for deterministic reuse across multiple frames / cameras
+sampled = pipeline.sample_with_seed(42)  # or pipeline.sample()
+frame1_res = sampled(image=img1)
+frame2_res = sampled(image=img2)
+
+# Direct introspection
+print(pipeline.explain())
+print(pipeline.to_mermaid())
 ```
 
 ### Key Distributions
@@ -151,7 +168,7 @@ src/
 ├── core/       # Transform, Executable, FusableImage, BarrierImage
 ├── ir/         # Transform IR (Plan)
 ├── sampled_ir/ # Sampled IR (pure enums, serializable)
-├── exec/       # Execution IR + Optimizer
+├── exec_ir/    # Execution IR + Optimizer
 └── transforms/ # Individual transforms (photometric, geometric, kernel, lut)
 ```
 
@@ -163,29 +180,22 @@ Quick summary:
 1. Implement `Transform` trait (declare `access()`, `shape_effect()`, `reorder_rule()`)
 2. Implement `Executable` trait
 3. For photometric ops: implement `LutOp` to enable fusion
-4. Register in `src/exec/exec_ir/execution.rs` (2 locations in dispatch lists)
+4. Register in `src/exec_ir/execution.rs` (dispatch lists)
 
 ## Common Pitfalls
 
-### ALWAYS Use `.copy()` When Applying Transforms
+### Memory Semantics: Copy-By-Default, `inplace=True` To Opt Out
 
-**NEVER forget `.copy()` - transforms modify arrays in-place!**
+`apply(...)` and `__call__(...)` default to `inplace=False`: the input array is **never** modified (the engine copies it defensively when needed, or executes zero-copy when out-of-place buffer allocation already occurs). Pass `inplace=True` for zero-copy in-place execution when the input buffer is disposable.
 
 ```python
-# WRONG - modifies the original array!
+# Default (safe): returns a new array, img_array is untouched
 result = pipeline.apply(img_array)
-print(img_array.mean())  # This has been modified!
 
-# CORRECT - preserves the original
-result = pipeline.apply(img_array.copy())
-print(img_array.mean())  # Original is unchanged
+# Fast path: mutates img_array in place, zero allocations
+result = pipeline.apply(img_array, inplace=True)  # img_array is now modified!
 ```
 
-**Why this happens**: Most transforms are `InPlace` - they modify the input array directly without allocating a new buffer. This is a performance optimization.
-
-**Symptoms of this bug**:
-- Unexpected values in your "original" array
-- Multiple transforms affecting each other's inputs
-- Data corruption when reusing arrays
-
-**Lesson**: Always use `.copy()` unless you explicitly want to modify the original!
+**Return-value convention**:
+- `apply(...)` and a bare `transform(image)` call return the transformed **array**
+- Passing label targets (`bboxes=`/`keypoints=`/`masks=`/`mask=`) or calling `Compose(image, ...)` returns a **dict** of targets.

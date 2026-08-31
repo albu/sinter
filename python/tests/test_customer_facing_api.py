@@ -14,6 +14,9 @@ from sinter import (
     ToSepia,
     ColorTemperature,
     HueSaturationValue,
+    RGBShift,
+    GaussNoise,
+    Crop,
     ColorTint,
     HorizontalFlip,
     VerticalFlip,
@@ -420,3 +423,53 @@ class TestContainerProtocol:
         assert len(res_empty["bboxes"]) == 0
         assert isinstance(res_empty["keypoints"], list)
         assert len(res_empty["keypoints"]) == 0
+
+    def test_pipeline_slicing_and_concatenation(self):
+        t1 = Brightness(delta=10)
+        t2 = Contrast(factor=1.2)
+        t3 = HorizontalFlip()
+        t4 = VerticalFlip()
+        pipeline = Compose([t1, t2, t3, t4])
+
+        # Slicing
+        sub = pipeline[1:3]
+        assert isinstance(sub, Compose)
+        assert len(sub) == 2
+        assert "Contrast" in repr(sub[0])
+        assert "HorizontalFlip" in repr(sub[1])
+
+        # Addition with list
+        p_added = sub + [Brightness(delta=20)]
+        assert isinstance(p_added, Compose)
+        assert len(p_added) == 3
+
+        # Addition with Compose
+        p_merged = sub + Compose([t4])
+        assert isinstance(p_merged, Compose)
+        assert len(p_merged) == 3
+
+        # Right addition with list
+        p_radded = [t1] + sub
+        assert isinstance(p_radded, Compose)
+        assert len(p_radded) == 3
+
+        # Direct sample() without explicit seed
+        sampled = p_merged.sample()
+        assert sampled.len() == 3
+
+    def test_flexible_transform_constructors(self):
+        # HueSaturationValue with various alias formats
+        hsv = HueSaturationValue(hue_shift=(-20, 20), sat_shift=(-30, 30), val_shift=(-20, 20))
+        assert "HueSaturationValue" in repr(hsv)
+
+        # RGBShift with limits
+        rgb = RGBShift(r_shift_limit=20, g_shift_limit=(-10, 10))
+        assert "RGBShift" in repr(rgb)
+
+        # GaussNoise with var_limit
+        gn = GaussNoise(var_limit=(10, 50))
+        assert "GaussNoise" in repr(gn)
+
+        # Crop with x_min/y_min/x_max/y_max
+        crop = Crop(x_min=10, y_min=10, x_max=90, y_max=90)
+        assert "Crop" in repr(crop)

@@ -84,7 +84,7 @@ Rotate90 + HorizontalFlip → Transpose
 
 | Transform | Fusable | Description |
 |-----------|---------|-------------|
-| **GaussianBlur** | ❌ | Gaussian blur (optionally OpenCV) |
+| **GaussianBlur** | ❌ | Gaussian blur (pure SIMD) |
 | **MedianBlur** | ❌ | Median blur |
 | **Sharpen** | ❌ | Sharpen kernel |
 | **Emboss** | ❌ | Emboss effect |
