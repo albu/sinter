@@ -127,6 +127,8 @@ impl<L: Label> BatchTransform<L> for MixUp {
         let channels = batch.channels().expect("batch channels must be set");
         let row_stride = width * channels;
 
+        let orig_images: Vec<Vec<u8>> = batch.images.iter().map(|img| img.data.clone()).collect();
+
         // Process each sample in the batch
         for i in 0..n {
             // Sample λ from Beta(alpha, alpha)
@@ -150,8 +152,8 @@ impl<L: Label> BatchTransform<L> for MixUp {
             let label_j = batch.labels[j].clone();
 
             // Perform pixel-wise mixing: result = λ * img_i + (1 - λ) * img_j
-            // Use raw pointers to avoid borrow checker issues (i != j is guaranteed)
-            let src_ptr = batch.images[j].data.as_ptr();
+            let src_j_ptr = orig_images[j].as_ptr();
+            let src_i_ptr = orig_images[i].as_ptr();
             let dst_ptr = batch.images[i].data.as_mut_ptr();
 
             for y in 0..height {
@@ -160,15 +162,11 @@ impl<L: Label> BatchTransform<L> for MixUp {
                 for x in 0..row_stride {
                     let idx = row_offset + x;
 
-                    // SAFETY: idx is computed from valid dimensions (height, row_stride)
-                    // and stays within the bounds of both image data arrays
-                    let pixel_i = unsafe { *dst_ptr.add(idx) } as f32;
-                    let pixel_j = unsafe { *src_ptr.add(idx) } as f32;
+                    let pixel_i = unsafe { *src_i_ptr.add(idx) } as f32;
+                    let pixel_j = unsafe { *src_j_ptr.add(idx) } as f32;
 
                     // Compute: λ * pixel_i + (1 - λ) * pixel_j
-                    // Then convert back to u8 with rounding
                     let mixed = lambda * pixel_i + (1.0 - lambda) * pixel_j;
-                    // SAFETY: Same idx bounds as read above, write is valid
                     unsafe {
                         *dst_ptr.add(idx) = mixed.round() as u8;
                     }
