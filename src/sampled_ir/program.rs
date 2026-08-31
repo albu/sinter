@@ -383,6 +383,10 @@ impl SampledImageProgram {
                     current_w = *width;
                     current_h = *height;
                 }
+                SampledImageOp::RandomCrop { width, height, .. } => {
+                    current_w = *width;
+                    current_h = *height;
+                }
                 SampledImageOp::Pad {
                     top,
                     bottom,
@@ -456,6 +460,10 @@ impl SampledImageProgram {
                     width,
                     height,
                 } => {
+                    current_w = *width;
+                    current_h = *height;
+                }
+                SampledImageOp::RandomCrop { width, height, .. } => {
                     current_w = *width;
                     current_h = *height;
                 }

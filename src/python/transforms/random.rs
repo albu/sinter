@@ -1115,6 +1115,81 @@ impl PyRotate {
     }
 }
 
+/// RandomCrop - crop a random `width` x `height` window
+///
+/// The window position is drawn at sample time (seeded) and resolved against
+/// the actual image size at execution time, so the same pipeline works for any
+/// image size. Argument order matches Resize: (width, height).
+#[cfg(feature = "python")]
+#[pyclass(name = "RandomCrop")]
+pub struct PyRandomCrop {
+    pub width: u32,
+    pub height: u32,
+    pub p: Dist,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyRandomCrop {
+    #[new]
+    #[pyo3(signature = (width, height, p=None))]
+    fn new(width: u32, height: u32, p: Option<&PyAny>) -> PyResult<Self> {
+        if width == 0 || height == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "width and height must be positive",
+            ));
+        }
+        Ok(Self {
+            width,
+            height,
+            p: parse_p_dist(p)?,
+        })
+    }
+
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    fn __call__<'py>(
+        &self,
+        image: &'py PyAny,
+        bboxes: Option<&'py PyAny>,
+        keypoints: Option<&'py PyAny>,
+        masks: Option<&'py PyAny>,
+        mask: Option<&'py PyAny>,
+        bbox_format: &str,
+        keypoint_format: &str,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<PyObject> {
+        let node = RandomImageNode::RandomCrop {
+            width: self.width,
+            height: self.height,
+        };
+        apply_node_to_targets(node, self.p.clone(), image, bboxes, keypoints, masks, mask, bbox_format, keypoint_format, inplace, py)
+    }
+
+    #[pyo3(signature = (array, inplace=None))]
+    fn apply<'py>(
+        &self,
+        array: &'py PyAny,
+        inplace: Option<bool>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let node = RandomImageNode::RandomCrop {
+            width: self.width,
+            height: self.height,
+        };
+        apply_node_to_image(node, self.p.clone(), array, inplace, py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RandomCrop(width={}, height={}, p={})",
+            self.width,
+            self.height,
+            format_dist(&self.p)
+        )
+    }
+}
+
 /// Resize - resize to specific dimensions
 /// Resize to a target width/height (nearest or bilinear).
 #[cfg(feature = "python")]
@@ -2066,6 +2141,10 @@ pub(crate) fn extract_node(item: &PyAny) -> PyResult<RandomImageNode> {
     extract_manual_node!(
         item,
         PyRotate => |obj: &PyRotate| RandomImageNode::Rotate { angle: obj.angle },
+        PyRandomCrop => |obj: &PyRandomCrop| RandomImageNode::RandomCrop {
+            width: obj.width,
+            height: obj.height,
+        },
         PyResize => |obj: &PyResize| RandomImageNode::Resize {
             width: obj.width,
             height: obj.height,

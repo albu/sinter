@@ -412,6 +412,29 @@ class Crop:
     ) -> Union[np.ndarray, Dict[str, Any]]: ...
     def apply(self, array: np.ndarray, inplace: bool = False) -> np.ndarray: ...
 
+class RandomCrop:
+    """Crop a random width x height window.
+
+    The window position is drawn at sample time (seeded) and resolved against
+    the actual image size, so one pipeline fits any image size. Argument order
+    matches Resize: (width, height).
+    """
+    width: int
+    height: int
+    p: DistInput
+    def __init__(self, width: int, height: int, p: Optional[DistInput] = None) -> None: ...
+    def __call__(
+        self,
+        image: np.ndarray,
+        bboxes: Optional[np.ndarray] = None,
+        keypoints: Optional[np.ndarray] = None,
+        masks: Optional[np.ndarray] = None,
+        bbox_format: BBoxFormat = "xywh",
+        keypoint_format: KeypointFormat = "xy",
+        inplace: bool = False,
+    ) -> Union[np.ndarray, Dict[str, Any]]: ...
+    def apply(self, array: np.ndarray, inplace: bool = False) -> np.ndarray: ...
+
 class Pad:
     """Pad image borders with specified mode (reflect, replicate, wrap, constant)."""
     top: DistInput

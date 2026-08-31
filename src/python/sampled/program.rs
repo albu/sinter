@@ -35,6 +35,18 @@ fn validate_crop_bounds(
                     height.saturating_sub(h)
                 )));
             }
+        } else if let ExecNodeKind::Barrier(SampledImageOp::RandomCrop {
+            width: w, height: h, ..
+        }) = &node.kind
+        {
+            let (w, h) = (*w as usize, *h as usize);
+            if w > width || h > height {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "RandomCrop window {}x{} exceeds image size ({}x{}); \
+                     the window must fit inside the image",
+                    w, h, width, height
+                )));
+            }
         }
     }
     Ok(())

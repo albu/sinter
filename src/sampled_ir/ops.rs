@@ -249,6 +249,17 @@ pub enum SampledImageOp {
         height: u32,
     },
 
+    /// Crop a fixed-size window at a sampled fractional position.
+    /// Anchors (fx, fy in [0, 1)) resolve against the actual image size at
+    /// execution time, so one sampled program fits any image size while
+    /// image and label transforms agree exactly.
+    RandomCrop {
+        width: u32,
+        height: u32,
+        fx: f32,
+        fy: f32,
+    },
+
     /// Pad image
     Pad {
         top: u32,
@@ -399,6 +410,14 @@ impl SampledImageOp {
                 width,
                 height,
             } => Some(Box::new(Crop::new(*x, *y, *width, *height))),
+            SampledImageOp::RandomCrop {
+                width,
+                height,
+                fx,
+                fy,
+            } => Some(Box::new(crate::transforms::geometric::RandomCrop::new(
+                *width, *height, *fx, *fy,
+            ))),
             SampledImageOp::Pad {
                 top,
                 bottom,
@@ -505,6 +524,7 @@ impl SampledImageOp {
             SampledImageOp::Affine { .. } => "Affine",
             SampledImageOp::Resize { .. } => "Resize",
             SampledImageOp::Crop { .. } => "Crop",
+            SampledImageOp::RandomCrop { .. } => "RandomCrop",
             SampledImageOp::Pad { .. } => "Pad",
             SampledImageOp::GaussianBlur { .. } => "GaussianBlur",
             SampledImageOp::MedianBlur { .. } => "MedianBlur",
@@ -554,6 +574,7 @@ impl SampledImageOp {
             SampledImageOp::Affine { .. } => false,
             SampledImageOp::Resize { .. } => false,
             SampledImageOp::Crop { .. } => false,
+            SampledImageOp::RandomCrop { .. } => false,
             SampledImageOp::Pad { .. } => false,
 
             // Kernel ops preserve shape

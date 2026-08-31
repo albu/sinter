@@ -92,6 +92,10 @@ pub enum RandomImageNode {
         width: Dist,
         height: Dist,
     },
+    RandomCrop {
+        width: u32,
+        height: u32,
+    },
     Pad {
         top: Dist,
         bottom: Dist,
@@ -305,6 +309,18 @@ impl RandomImageNode {
                     y: sampled_y,
                     width: sampled_w,
                     height: sampled_h,
+                });
+            }
+            RandomImageNode::RandomCrop { width, height } => {
+                // Position resolves against the actual image size at execution
+                // time, so only the fractional anchors are sampled here.
+                let fx = ctx.rng.random_f32();
+                let fy = ctx.rng.random_f32();
+                out.push(SampledImageOp::RandomCrop {
+                    width: *width,
+                    height: *height,
+                    fx,
+                    fy,
                 });
             }
             RandomImageNode::Pad {
@@ -630,6 +646,7 @@ impl RandomImageNode {
             // Geometric: OutOfPlace (shape-changing)
             RandomImageNode::Resize { .. }
             | RandomImageNode::Crop { .. }
+            | RandomImageNode::RandomCrop { .. }
             | RandomImageNode::Pad { .. }
             | RandomImageNode::Affine { .. } => AccessPattern::OutOfPlace,
 
@@ -699,6 +716,7 @@ impl RandomImageNode {
             // Geometric: shape-changing
             RandomImageNode::Resize { .. } => ShapeEffect::Resize,
             RandomImageNode::Crop { .. } => ShapeEffect::Crop,
+            RandomImageNode::RandomCrop { .. } => ShapeEffect::Crop,
             RandomImageNode::Pad { .. } => ShapeEffect::Pad,
             RandomImageNode::Affine { .. } => ShapeEffect::Resize,
 

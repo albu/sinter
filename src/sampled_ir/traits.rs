@@ -56,6 +56,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Affine { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Resize { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Crop { .. } => AccessPattern::OutOfPlace,
+            SampledImageOp::RandomCrop { .. } => AccessPattern::OutOfPlace,
             SampledImageOp::Pad { .. } => AccessPattern::OutOfPlace,
 
             // Kernel: OutOfPlace
@@ -106,6 +107,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Affine { .. } => ShapeEffect::Resize,
             SampledImageOp::Resize { .. } => ShapeEffect::Resize,
             SampledImageOp::Crop { .. } => ShapeEffect::Crop,
+            SampledImageOp::RandomCrop { .. } => ShapeEffect::Crop,
             SampledImageOp::Pad { .. } => ShapeEffect::Pad,
 
             // Kernel: Preserve
@@ -322,6 +324,13 @@ impl Executable for SampledImageOp {
                 width,
                 height,
             } => Crop::new(*x, *y, *width, *height).execute(image),
+            SampledImageOp::RandomCrop {
+                width,
+                height,
+                fx,
+                fy,
+            } => crate::transforms::geometric::RandomCrop::new(*width, *height, *fx, *fy)
+                .execute(image),
             SampledImageOp::Pad {
                 top,
                 bottom,

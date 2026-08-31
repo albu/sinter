@@ -45,8 +45,9 @@ use transforms::{
     PyColorTemperature, PyColorTint, PyCompose, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
     PyEqualize, PyGamma, PyGaussNoise, PyGaussianBlur, PyGaussianBlurSigma, PyGridDropout,
     PyHorizontalFlip, PyHueSaturationValue, PyInvert, PyMedianBlur, PyMultiplicativeNoise,
-    PyNormalize, PyPad, PyPosterize, PyRGBShift, PyResize, PyRotate, PySaltAndPepper, PySharpen,
-    PySolarize, PyToGray, PyToRGB, PyToSepia, PyTranspose, PyVerticalFlip,
+    PyNormalize, PyPad, PyPosterize, PyRandomCrop, PyRGBShift, PyResize, PyRotate,
+    PySaltAndPepper, PySharpen, PySolarize, PyToGray, PyToRGB, PyToSepia, PyTranspose,
+    PyVerticalFlip,
 };
 
 // Distribution types
@@ -91,6 +92,7 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
         PyRotate,
         PyResize,
         PyCrop,
+        PyRandomCrop,
         PyPad,
         PyAffine,
     );

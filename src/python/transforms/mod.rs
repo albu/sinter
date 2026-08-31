@@ -14,7 +14,8 @@ mod helpers;
 
 // Unified API (with distribution support) - exports ALL transforms
 pub use random::{
-    PyHorizontalFlip, PyVerticalFlip, PyTranspose, PyRotate, PyResize, PyCrop, PyPad, PyAffine,
+    PyHorizontalFlip, PyVerticalFlip, PyTranspose, PyRotate, PyResize, PyCrop, PyRandomCrop, PyPad,
+    PyAffine,
     PyInvert,
     PyBrightness, PyContrast, PyPosterize, PySolarize,
     PyGamma, PyNormalize, PyEqualize, PyAutoContrast, PyToGray, PyToSepia, PyToRGB,
