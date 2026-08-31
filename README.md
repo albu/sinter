@@ -76,23 +76,28 @@ Compose([Brightness(), HorizontalFlip(), Contrast()])
 
 ## Benchmarks
 
-Benchmark results on Apple M1 Pro (ARM64), single-threaded.
+Benchmark results on **Apple M4** (ARM64), single-threaded, generated with the benchmark
+suite in `python/benchmarks/` (min-of-batches; both sides receive the same input — no harness
+copy asymmetry). "vs albumentations" tables compare against albumentations 2.0.8; OpenCV
+comparisons use cv2 5.0.0 with `setNumThreads(0)`.
 
-### Fair Comparison (Equivalent Transforms)
+### Fair Comparison vs Albumentations (RGB)
 
 **512×512 images**:
 | Pipeline | Albumentations | Sinter | Speedup |
 |----------|----------------|--------|---------|
-| **8 LUT transforms** | 0.53 ms | 0.09 ms | **5.9x** |
-| **4 LUT transforms** | 0.22 ms | 0.10 ms | **2.2x** |
-| **Full pipeline** (16 transforms) | 12.38 ms | 3.92 ms | **3.2x** |
+| **4 LUT transforms** | 0.45 ms | 0.07 ms | **6.4x** |
+| **8 LUT transforms** | 1.11 ms | 0.07 ms | **16.8x** |
+| **Mixed Geo + LUT** (Flip, Brightness, Contrast) | 0.235 ms | 0.08 ms | **2.8x** |
+| **Heavy pipeline** (14 alb / 17 sinter transforms) | 7.9 ms | 1.7 ms | **4.6x** |
 
 **1024×1024 images** (speedup scales with image size):
 | Pipeline | Albumentations | Sinter | Speedup |
 |----------|----------------|--------|---------|
-| **8 LUT transforms** | 1.85 ms | 0.34 ms | **5.5x** |
-| **4 LUT transforms** | 0.82 ms | 0.37 ms | **2.2x** |
-| **Full pipeline** (16 transforms) | 51.88 ms | 15.82 ms | **3.3x** |
+| **4 LUT transforms** | 1.73 ms | 0.30 ms | **5.8x** |
+| **8 LUT transforms** | 4.30 ms | 0.25 ms | **17.0x** |
+| **Mixed Geo + LUT** (Flip, Brightness, Contrast) | 0.906 ms | 0.33 ms | **2.7x** |
+| **Heavy pipeline** (14 alb / 17 sinter transforms) | 30.0 ms | 6.9 ms | **4.4x** |
 
 ### Notable Architectural Wins
 
@@ -100,9 +105,10 @@ These benchmarks demonstrate specific fusion strategies:
 
 | Strategy | Example | Speedup |
 |----------|---------|---------|
-| **LUT Fusion** | 8 photometric transforms → single lookup table | **5-6x** |
-| **Geometric Composition** | FlipH + FlipV → Rot180 via D4 group | **1.2-1.4x** |
-| **Heavy Pipeline** | 16 transforms with mixed fusion | **3.2-3.3x** |
+| **LUT Fusion** | 8 photometric transforms → single lookup table | **16.8x / 17.0x** (512² / 1024²) |
+| **Matrix Fusion** | ToSepia + Saturation → single 3×3 matrix | **5.1x / 3.8x** |
+| **Geometric Composition** | FlipH + FlipV → Rot180 via D4 group | **3.0x / 3.8x** |
+| **Heavy Pipeline** | 14 transforms with mixed fusion | **4.6x / 4.4x** |
 
 **Why the speedup?**
 
@@ -116,24 +122,35 @@ These benchmarks demonstrate specific fusion strategies:
 - ARM64 (Apple Silicon, AWS Graviton) is the primary target with hand-tuned NEON code
 - Speedup scales with transform count - more transforms = more fusion opportunities
 - Single-threaded comparison; both libraries can use threading for batches
+- These tables are **vs albumentations**. Against raw cv2 (single-threaded, matched shapes)
+  the picture differs: sinter wins multi-pass/large-kernel Gaussian by 15–69× and most
+  LUT/matrix/geometric RGB ops, and is at/near parity on gray Transpose/Rot90 (~0.95×) and
+  affine scale (~1.0×) and rotate+scale (~1.3×). It still trails cv2 on single-pass
+  Gaussian 5×5 (~0.8×), gray VerticalFlip (~0.8×), affine with strong shear (~0.44×), and
+  MedianBlur (RGB 0.6–0.8×, gray ~0.4×). See `python/benchmarks/benchmark_gaussian_blur.py`
+  and `python/benchmarks/benchmark_geometric_grayscale.py`.
 
 See `python/benchmarks/benchmark_fusion.py` for the fusion benchmark suite.
 
-### Individual Transform Speedups
+### Individual Transform Speedups (vs albumentations, RGB)
 
 Sinter includes hand-written NEON intrinsics for ARM64 that provide significant speedups even for single transforms:
 
 | Transform | Speedup (256x256) | Speedup (512x512) | Speedup (1024x1024) | Technique |
 |-----------|-------------------|-------------------|---------------------|-----------|
-| **Transpose** | **17.4x** | **16.0x** | **8.6x** | 8x8 block tiling with `vtrn1/vtrn2` |
-| **AutoContrast** | **7.1x** | **7.1x** | **5.3x** | LUT executor with `vqtbl4q_u8` |
-| **Equalize** | **2.9x** | **2.8x** | **2.7x** | LUT executor with `vqtbl4q_u8` |
-| **GaussianBlur(3x3)** | **2.5x** | **1.7x** | **1.8x** | Symmetric folding + `vld3q_u8` |
-| **GaussianBlur(7x7)** | **2.5x** | **2.3x** | **2.1x** | Separable convolution |
-| **ToGray** | **2.2x** | 1.1x | **1.8x** | RGB luminance formula |
-| **Sharpen** | **1.7x** | **1.7x** | **1.7x** | 3x3 convolution kernel |
-| **Solarize** | **1.8x** | 1.2x | 1.4x | LUT executor |
-| **HueSaturationValue** | 1.0x | 1.3x | **1.5x** | SIMD FP HSV conversion |
+| **Transpose** | **15.3x** | **15.0x** | **6.5x** | 8x8 block tiling with `vtrn1/vtrn2` |
+| **AutoContrast** | **9.9x** | **9.1x** | **8.7x** | LUT executor with `vqtbl4q_u8` |
+| **HueSaturationValue** | **7.1x** | **7.0x** | **6.9x** | SIMD FP HSV conversion |
+| **GaussianBlur(3x3)** | **4.7x** | **5.1x** | **4.9x** | Fused rolling separable `[1,2,1]` |
+| **GaussianBlur(5x5)** | **3.4x** | **3.7x** | **4.1x** | Fused rolling separable `[1,4,6,4,1]` |
+| **GaussianBlur(7x7)** | **2.3x** | **2.9x** | **3.4x** | Fused rolling separable `[1,6,15,20,15,6,1]` |
+| **Sharpen** | **3.0x** | **3.3x** | **3.7x** | 3x3 convolution kernel |
+| **Solarize** | **4.0x** | **3.4x** | **3.2x** | LUT executor |
+| **ToGray** | **2.7x** | **2.3x** | **2.3x** | RGB luminance formula |
+| **Equalize** | **1.7x** | **1.6x** | **1.6x** | LUT executor |
+
+Notes: HSV is the full hue+sat+val variant; the saturation-only comparison is ~1.3×. The
+Gaussian technique column reflects the current interleaved fused-ring kernels.
 
 Run individual benchmarks:
 ```bash
@@ -211,7 +228,7 @@ This prototype is written in Rust to explore:
 2. **Type-level optimization**: Can the compiler prove fusion safety?
 3. **SIMD integration**: Hand-written NEON intrinsics for ARM64 (Apple Silicon, AWS Graviton)
 
-Performance matters: the 2-5x speedup vs traditional libraries comes from both fusion optimizations and hand-tuned NEON code.
+Performance matters: the ~1.6–17× speedup vs traditional libraries comes from both fusion optimizations and hand-tuned NEON code.
 
 ---
 

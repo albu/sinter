@@ -4,12 +4,13 @@
 // Uses NEON-optimized separable convolution for 3x3, 5x5, 7x7 kernels.
 //
 // For sigma-based Gaussian blur with arbitrary kernel sizes, use GaussianBlurSigma
-// which forwards to OpenCV's highly optimized implementation.
+// (native Rust decision-tree: specialized Pascal kernels for sigma <= 1.5, symmetric
+// separable convolution for larger sigma, box-blur approximation in Fast quality).
 //
-// PERFORMANCE:
-// - 3x3: ~650 MP/s (NEON SIMD separable)
-// - 5x5: ~730 MP/s (NEON SIMD separable)
-// - 7x7: ~385 MP/s (NEON SIMD separable)
+// PERFORMANCE (RGB, Apple M4, min-of-batches, cv2 5.0.0 sigma=0 baseline):
+// - 3x3: ~4200-5000 MP/s (interleaved fused rolling separable)
+// - 5x5: ~1900-2700 MP/s
+// - 7x7: ~1000-1700 MP/s
 
 use super::convolve::convolve_separable;
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
@@ -17,11 +18,11 @@ use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transfor
 /// Kernel size for Gaussian blur
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KernelSize {
-    /// 3x3 kernel via separable convolution (fastest, light blur, ~650 MP/s)
+    /// 3x3 kernel via separable convolution (fastest, light blur, ~4200-5000 MP/s)
     Size3,
-    /// 5x5 kernel via separable convolution (fast, moderate blur, ~730 MP/s)
+    /// 5x5 kernel via separable convolution (fast, moderate blur, ~1900-2700 MP/s)
     Size5,
-    /// 7x7 kernel via separable convolution (fast, strong blur, ~385 MP/s)
+    /// 7x7 kernel via separable convolution (fast, strong blur, ~1000-1700 MP/s)
     Size7,
 }
 
@@ -31,9 +32,9 @@ pub enum KernelSize {
 /// Uses NEON-optimized separable convolution for 3×3, 5×5, and 7×7 kernels.
 ///
 /// **Performance:**
-/// - 3×3: Pascal row 2 [1, 2, 1] → ~650 MP/s
-/// - 5×5: Pascal row 4 [1, 4, 6, 4, 1] → ~730 MP/s
-/// - 7×7: Pascal row 6 [1, 6, 15, 20, 15, 6, 1] → ~385 MP/s
+/// - 3×3: Pascal row 2 [1, 2, 1] → ~4200-5000 MP/s
+/// - 5×5: Pascal row 4 [1, 4, 6, 4, 1] → ~1900-2700 MP/s
+/// - 7×7: Pascal row 6 [1, 6, 15, 20, 15, 6, 1] → ~1000-1700 MP/s
 ///
 /// All configurations preserve constant images correctly.
 ///

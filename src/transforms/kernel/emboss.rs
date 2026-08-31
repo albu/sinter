@@ -114,7 +114,7 @@ impl Executable for Emboss {
 }
 
 impl Emboss {
-    /// Pure Rust implementation (used as fallback or when opencv feature is disabled)
+    /// Pure Rust implementation (all platforms; no OpenCV dependency)
     fn execute_rust(&self, image: &mut FusableImage) {
         // Blend-based emboss kernel (compatible with albumentations)
         // kernel = (1 - alpha) * identity + alpha * emboss_effect
