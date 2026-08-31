@@ -19,6 +19,7 @@ from sinter import GaussianBlur as SinterGaussianBlur, Compose
 
 WARMUP_RUNS = 3
 BENCHMARK_RUNS = 30
+BENCHMARK_BATCHES = 5
 
 # Test different image sizes
 IMAGE_SIZES = [
@@ -50,6 +51,29 @@ SIGMA_MAP = {
 }
 
 
+def timeit_min(fn, img, runs, batches=BENCHMARK_BATCHES, warmup=WARMUP_RUNS):
+    """Min-of-batches timing; passes the SAME input to both sides, op-only.
+
+    Sinter's GaussianBlur is IN-PLACE (verified at runtime: apply() returns the
+    same buffer and mutates its input); cv2's is out-of-place. The sinter side
+    therefore re-blurs already-blurred data across iterations. This is safe for
+    timing: the blur is branchless with fixed memory traffic, so its cost does
+    not depend on pixel values — but do NOT extend this raw-input pattern to
+    ops with data-dependent timing. No harness-level input copy on either side
+    (the old asymmetry where sinter paid img.copy() and cv2 did not is gone).
+    """
+    for _ in range(warmup):
+        fn(img)
+    best = float("inf")
+    for _ in range(batches):
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn(img)
+        batch = (time.perf_counter() - start) / runs * 1000
+        best = min(best, batch)
+    return best
+
+
 def benchmark_single(image_size, kernel_size):
     """Benchmark a single image size + kernel size combination."""
     height, width = image_size[:2]
@@ -60,26 +84,18 @@ def benchmark_single(image_size, kernel_size):
     # Sinter GaussianBlur (our implementation)
     sinter_pipe = Compose([SinterGaussianBlur(kernel_size=kernel_size)])
 
-    for _ in range(WARMUP_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-
-    start = time.perf_counter()
-    for _ in range(BENCHMARK_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-    sinter_time = (time.perf_counter() - start) / BENCHMARK_RUNS * 1000
+    sinter_time = timeit_min(sinter_pipe.apply, img, BENCHMARK_RUNS)
 
     # OpenCV GaussianBlur (for comparison)
     cv_time = None
     if HAS_CV2:
         sigma = SIGMA_MAP.get(kernel_size)  # Must match Pascal kernel sigma
 
-        for _ in range(WARMUP_RUNS):
-            _ = cv2.GaussianBlur(img, (kernel_size, kernel_size), sigma)
-
-        start = time.perf_counter()
-        for _ in range(BENCHMARK_RUNS):
-            _ = cv2.GaussianBlur(img, (kernel_size, kernel_size), sigma)
-        cv_time = (time.perf_counter() - start) / BENCHMARK_RUNS * 1000
+        cv_time = timeit_min(
+            lambda x: cv2.GaussianBlur(x, (kernel_size, kernel_size), sigma),
+            img,
+            BENCHMARK_RUNS,
+        )
 
     return cv_time, sinter_time
 

@@ -27,13 +27,19 @@ from sinter import (
 )
 
 
-def timeit(fn, img, runs):
-    for _ in range(3):
+def timeit_min(fn, img, runs, batches=5, warmup=3):
+    """Min-of-batches timing. Both sides receive the SAME input so harness
+    overhead (a per-call copy for in-place ops) cancels in ratios."""
+    for _ in range(warmup):
         fn(img.copy())
-    t = time.perf_counter()
-    for _ in range(runs):
-        fn(img.copy())
-    return (time.perf_counter() - t) / runs * 1000
+    best = float("inf")
+    for _ in range(batches):
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn(img.copy())
+        batch = (time.perf_counter() - start) / runs * 1000
+        best = min(best, batch)
+    return best
 
 
 def main():
@@ -67,18 +73,19 @@ def main():
              lambda x: cv2.medianBlur(x, 3)),
             ("MedianBlur5x5", Compose([MedianBlur(kernel_size=5)]),
              lambda x: cv2.medianBlur(x, 5)),
-            ("Invert", Compose([Invert()]), lambda x: 255 - x),
-            ("Transpose", Compose([Transpose()]), lambda x: x.T.copy()),
-            ("HorizontalFlip", Compose([HorizontalFlip()]), lambda x: x[:, ::-1].copy()),
+            ("Invert", Compose([Invert()]), lambda x: cv2.bitwise_not(x)),
+            ("Transpose", Compose([Transpose()]), lambda x: cv2.transpose(x)),
+            ("HorizontalFlip", Compose([HorizontalFlip()]), lambda x: cv2.flip(x, 1)),
             ("Rotate90", Compose([Rotate(angle=RotateAngle.ROTATE_90)]),
-             lambda x: np.rot90(x, 1).copy()),
+             lambda x: cv2.rotate(x, cv2.ROTATE_90_CLOCKWISE)),
         ]
 
         for name, sinter_pipe, cv_fn in cases:
             def s(x):
-                return sinter_pipe.apply(x[:, :, None].copy())[:, :, 0]
-            st = timeit(s, img, runs)
-            ct = timeit(cv_fn, img, runs)
+                # x[:, :, None] is already C-contiguous; no extra copy needed.
+                return sinter_pipe.apply(x[:, :, None])[:, :, 0]
+            st = timeit_min(s, img, runs)
+            ct = timeit_min(cv_fn, img, runs)
             print(f"{name:24s} {n:6d} {st:11.3f} {ct:11.3f} {st / ct:6.2f}x")
 
 

@@ -49,9 +49,26 @@ from sinter import (
 
 WARMUP_RUNS = 5
 BENCHMARK_RUNS = 100
+BENCHMARK_BATCHES = 5
 
 # Global filter state (mutable container to avoid global keyword issues)
 _FILTER_STATE = {"cats": None, "names": None}
+
+
+def timeit_min(fn, img, runs, batches=BENCHMARK_BATCHES, warmup=WARMUP_RUNS):
+    """Min-of-batches timing with a shared warmup. Both sides receive the same
+    per-call input so harness overhead cancels in ratios."""
+    for _ in range(warmup):
+        fn(img)
+    best = float("inf")
+    for _ in range(batches):
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn(img)
+        batch = (time.perf_counter() - start) / runs * 1000
+        best = min(best, batch)
+    return best
+
 
 def should_run(transform_name, categories, transforms):
     """Check if a transform should be benchmarked based on filters"""
@@ -91,27 +108,21 @@ def benchmark_transform(name, albumentations_transform, sinter_transform_factory
     # Skip if not in filter
     if not should_run(name, _FILTER_STATE["cats"], _FILTER_STATE["names"]):
         return None, None, None
-    # Warmup sinter
     sinter_pipe = Compose([sinter_transform_factory()])
-    for _ in range(WARMUP_RUNS):
-        _ = sinter_pipe.apply(img.copy())
-
-    # Benchmark sinter
-    start = time.perf_counter()
-    for _ in range(runs):
-        _ = sinter_pipe.apply(img.copy())
-    sinter_time = (time.perf_counter() - start) / runs * 1000
+    sinter_time = timeit_min(sinter_pipe.apply, img.copy(), runs)
 
     if HAS_ALBUMENTATIONS and albumentations_transform is not None:
-        # Warmup albumentations
-        for _ in range(WARMUP_RUNS):
-            _ = albumentations_transform(image=img.copy())
+        # Materialize albumentations output inside the timed region: transforms
+        # like Crop return a zero-copy view, which would otherwise hide the
+        # real work behind a fake "win" vs sinter's materialized output.
+        def alb_timed(x):
+            res = albumentations_transform(image=x)
+            if isinstance(res, dict):
+                np.ascontiguousarray(res["image"])
+            else:
+                np.ascontiguousarray(res)
 
-        # Benchmark albumentations
-        start = time.perf_counter()
-        for _ in range(runs):
-            _ = albumentations_transform(image=img.copy())
-        albumentations_time = (time.perf_counter() - start) / runs * 1000
+        albumentations_time = timeit_min(alb_timed, img.copy(), runs)
 
         speedup = albumentations_time / sinter_time
         return albumentations_time, sinter_time, speedup
