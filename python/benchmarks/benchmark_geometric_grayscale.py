@@ -274,7 +274,11 @@ def benchmark_geometric_grayscale():
         return cv2.warpAffine(
             x, m, (size[0], size[1]),
             flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-            borderMode=cv2.BORDER_REPLICATE,
+            # sinter's Python Affine defaults to Constant{value:0}
+            # (sampled_ir/traits.rs), so the value comparison must use the
+            # same border or out-of-bounds corners diverge.
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
         )
 
     # One-time semantic check: same mapping must produce (near-)identical pixels
@@ -307,6 +311,9 @@ def benchmark_geometric_grayscale():
                                interpolation=Interpolation.BILINEAR)])
     assert_same_shape(pipe_rot.apply(img_gray.copy()), cv_affine(img_gray.copy(), M_inv_rot),
                       "affine rotate")
+    mad = np.abs(np.squeeze(pipe_rot.apply(img_gray.copy())).astype(np.int16)
+                 - np.squeeze(cv_affine(img_gray.copy(), M_inv_rot)).astype(np.int16)).mean()
+    print(f"  semantic check: mean |sinter - cv2| = {mad:.3f} (rounding tolerance ≤ 1)")
     t_sinter = timeit_min(pipe_rot.apply, img_gray, iterations)
     print(f"  Sinter affine:     {t_sinter:.4f} ms")
     print(f"  → Sinter is {t_opencv/t_sinter:.2f}x faster than OpenCV")
@@ -327,6 +334,9 @@ def benchmark_geometric_grayscale():
                                  interpolation=Interpolation.BILINEAR)])
     assert_same_shape(pipe_shear.apply(img_gray.copy()), cv_affine(img_gray.copy(), M_inv_shear),
                       "affine rotate+shear")
+    mad = np.abs(np.squeeze(pipe_shear.apply(img_gray.copy())).astype(np.int16)
+                 - np.squeeze(cv_affine(img_gray.copy(), M_inv_shear)).astype(np.int16)).mean()
+    print(f"  semantic check: mean |sinter - cv2| = {mad:.3f} (rounding tolerance ≤ 1)")
     t_sinter = timeit_min(pipe_shear.apply, img_gray, iterations)
     print(f"  Sinter affine:     {t_sinter:.4f} ms")
     print(f"  → Sinter is {t_opencv/t_sinter:.2f}x faster than OpenCV")

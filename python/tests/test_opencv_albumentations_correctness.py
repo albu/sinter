@@ -261,6 +261,53 @@ class TestGeometricCorrectness:
         )
         assert_close(sinter_res, cv_res, atol=2, max_mae=0.8, msg="Affine")
 
+    @pytest.mark.parametrize("scale,rotate,translate,shear", [
+        ((1.0, 1.0), 0.0, (0.0, 0.0), (0.0, 0.0)),
+        ((1.5, 1.5), 0.0, (0.0, 0.0), (0.0, 0.0)),
+        ((0.8, 0.8), 0.0, (0.0, 0.0), (0.0, 0.0)),
+        ((1.0, 1.0), 30.0, (0.0, 0.0), (0.0, 0.0)),
+        ((1.0, 1.0), -45.0, (0.0, 0.0), (0.0, 0.0)),
+        ((1.0, 1.0), 0.0, (5.0, -8.0), (0.0, 0.0)),
+        ((1.0, 1.0), 0.0, (0.0, 0.0), (10.0, 5.0)),
+        # rotate + shear: y span > 2 per 8 output px -> 8-row window path
+        ((1.3, 1.3), 45.0, (0.0, 0.0), (5.0, -5.0)),
+        ((1.3, 1.3), 45.0, (0.0, 0.0), (15.0, -15.0)),
+        ((1.3, 1.3), 75.0, (0.0, 0.0), (20.0, -20.0)),
+        ((1.3, 1.3), -45.0, (0.0, 0.0), (5.0, 10.0)),
+    ])
+    def test_affine_gray(self, image_shape, scale, rotate, translate, shear):
+        """Gray affine vs cv2 (the RGB-only test above does not cover C=1)."""
+        h, w = image_shape
+        img = create_test_image(h, w, 1)
+        sinter_res = Compose([Affine(
+            scale=scale,
+            rotate=rotate,
+            translate=translate,
+            shear=shear,
+            interpolation=Interpolation.BILINEAR,
+        )]).apply(img.copy())
+
+        import albumentations.augmentations.geometric.functional as fgeometric
+        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+        M = fgeometric.create_affine_transformation_matrix(
+            translate={'x': translate[0], 'y': translate[1]},
+            shear={'x': shear[0], 'y': shear[1]},
+            scale={'x': scale[0], 'y': scale[1]},
+            rotate=rotate,
+            shift=(cx, cy),
+        )
+
+        # sinter's Python Affine defaults to Constant{value:0} border.
+        cv_res = cv2.warpAffine(
+            img,
+            M[:2],
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        assert_close(sinter_res, cv_res, atol=2, max_mae=0.8, msg="Affine (gray)")
+
 
 # ============================================================================
 # 2. Photometric / LUT Transforms vs Albumentations / NumPy Ground Truth
@@ -647,4 +694,3 @@ class TestGrayscaleCorrectness:
             if c == 1 and ref.ndim == 2:
                 ref = ref[:, :, np.newaxis]
             assert_exact(sinter_res, ref, f"Grayscale MedianBlur 3x3 (c={c})")
-
