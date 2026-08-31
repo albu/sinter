@@ -201,6 +201,7 @@ impl Resize {
 
         BarrierImage {
             data: new_data,
+            f32_data: None,
             width: self.new_width,
             height: self.new_height,
             channels,

@@ -623,10 +623,11 @@ class Gamma:
     def apply(self, array: np.ndarray, inplace: bool = False) -> np.ndarray: ...
 
 class Normalize:
-    """Normalize pixel values with mean and standard deviation.
+    """Normalize pixel values to float32: `(v / 255 - mean) / std`.
 
-    Fast uint8-preserving scale transform: `(pixel - mean) / std * 255`.
-    For float32 standardized output tensors, convert after augmentation.
+    Matches torchvision/albumentations semantics with no precision loss.
+    Output dtype is float32, so Normalize must be the LAST transform in
+    a pipeline.
     """
     mean: DistInput
     std: DistInput

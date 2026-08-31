@@ -36,6 +36,13 @@ pub fn execute_plan(
 
         // If we got a new barrier image, use it for subsequent operations
         if let Some(new_barrier) = result {
+            if new_barrier.is_f32() && _i + 1 < plan.nodes.len() {
+                panic!(
+                    "Normalize produces float32 output and must be the last transform \
+                     (found {} more nodes after it)",
+                    plan.nodes.len() - _i - 1
+                );
+            }
             barrier_image = Some(new_barrier);
         }
     }

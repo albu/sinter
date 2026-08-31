@@ -1530,6 +1530,10 @@ impl PyAffine {
 }
 
 /// Normalize - normalize pixel values with mean and standard deviation
+///
+/// Produces a float32 array: `(v / 255 - mean) / std`, matching
+/// torchvision/albumentations semantics. Because the output dtype changes,
+/// Normalize must be the LAST transform in a pipeline.
 #[cfg(feature = "python")]
 #[pyclass(name = "Normalize")]
 pub struct PyNormalize {

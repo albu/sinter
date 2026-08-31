@@ -40,8 +40,11 @@ pub struct FusableImage<'a> {
 /// Used for barrier nodes that change shape or require special memory layout.
 #[derive(Clone)]
 pub struct BarrierImage {
-    /// Owned HWC pixel data
+    /// Owned HWC pixel data (empty when f32_data is present)
     pub data: Vec<u8>,
+    /// Float payload for terminal float barriers (Normalize).
+    /// When present, `data` is empty and no further engine node may run.
+    pub f32_data: Option<Vec<f32>>,
     pub width: usize,
     pub height: usize,
     pub channels: usize,
@@ -61,6 +64,7 @@ impl BarrierImage {
         let stride = width * channels;
         Self {
             data: vec![0u8; size],
+            f32_data: None,
             width,
             height,
             channels,
@@ -74,6 +78,7 @@ impl BarrierImage {
         let total_size = stride * height;
         Self {
             data: vec![0u8; total_size],
+            f32_data: None,
             width,
             height,
             channels,
@@ -89,12 +94,39 @@ impl BarrierImage {
         let stride = width * channels;
         Self {
             data,
+            f32_data: None,
             width,
             height,
             channels,
             stride,
             alignment: 0,
         }
+    }
+
+    /// Create a float32 barrier (terminal: Normalize output)
+    ///
+    /// `data` is left empty; nothing downstream in the engine can consume
+    /// float pixels, so this barrier must be the last node of a plan.
+    pub fn from_f32_vec(data: Vec<f32>, width: usize, height: usize, channels: usize) -> Self {
+        assert_eq!(
+            data.len(),
+            width * height * channels,
+            "f32 data size mismatch"
+        );
+        Self {
+            data: Vec::new(),
+            f32_data: Some(data),
+            width,
+            height,
+            channels,
+            stride: width * channels,
+            alignment: 0,
+        }
+    }
+
+    /// Does this barrier hold float32 pixels (terminal Normalize output)?
+    pub fn is_f32(&self) -> bool {
+        self.f32_data.is_some()
     }
 
     /// Total number of pixels
@@ -128,6 +160,7 @@ impl BarrierImage {
         let stride = img.width * img.channels;
         Self {
             data: img.data.to_vec(),
+            f32_data: None,
             width: img.width,
             height: img.height,
             channels: img.channels,

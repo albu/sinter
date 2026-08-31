@@ -49,6 +49,27 @@ fn validate_crop_bounds(
             }
         }
     }
+
+    // Normalize produces float32 output and terminates the pipeline: no
+    // transform can run after it.
+    let mut normalize_seen = false;
+    for node in &exec_plan.nodes {
+        let has_normalize = match &node.kind {
+            ExecNodeKind::Barrier(SampledImageOp::Normalize { .. }) => true,
+            ExecNodeKind::Fused(ops) => {
+                ops.iter().any(|op| matches!(op, SampledImageOp::Normalize { .. }))
+            }
+            _ => false,
+        };
+        if has_normalize {
+            normalize_seen = true;
+        } else if normalize_seen {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Normalize produces float32 output and must be the last transform \
+                 in the pipeline",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -508,7 +529,7 @@ impl PySampledImageProgram {
             match result {
                 Some(new_barrier) => {
                     let arr = crate::python::types::barrier_image_to_numpy_owned(py, new_barrier)?;
-                    Ok(arr.as_ref())
+                    Ok(arr)
                 }
                 None => Ok(array3.as_ref()),
             }
@@ -797,7 +818,7 @@ impl PySampledImageProgram {
             match result {
                 Some(new_barrier) => {
                     crate::python::types::barrier_image_to_numpy_owned(py, new_barrier)
-                        .map(|arr| arr.as_ref())
+                        .map(|arr| arr)
                 }
                 None => Ok(array3),
             }

@@ -16,7 +16,7 @@ impl Transform for SampledImageOp {
             SampledImageOp::Contrast { .. } => AccessPattern::InPlace,
             SampledImageOp::Gamma { .. } => AccessPattern::InPlace,
             SampledImageOp::Invert => AccessPattern::InPlace,
-            SampledImageOp::Normalize { .. } => AccessPattern::InPlace,
+            SampledImageOp::Normalize { .. } => AccessPattern::OutOfPlace, // allocates f32 output
             SampledImageOp::ToRGB => AccessPattern::OutOfPlace, // Changes channel count 1->3
             SampledImageOp::ToGray => AccessPattern::InPlace,
             SampledImageOp::ToSepia => AccessPattern::InPlace,
@@ -128,7 +128,8 @@ impl Transform for SampledImageOp {
             SampledImageOp::Contrast { .. } => ReorderRule::CommutesWithGeometry,
             SampledImageOp::Gamma { .. } => ReorderRule::CommutesWithGeometry,
             SampledImageOp::Invert => ReorderRule::CommutesWithGeometry,
-            SampledImageOp::Normalize { .. } => ReorderRule::CommutesWithGeometry,
+            // Normalize changes dtype (u8 -> f32): it must stay in place.
+            SampledImageOp::Normalize { .. } => ReorderRule::Barrier,
             SampledImageOp::ToRGB => ReorderRule::CommutesWithGeometry,
             SampledImageOp::ToGray => ReorderRule::CommutesWithGeometry,
             SampledImageOp::ToSepia => ReorderRule::CommutesWithGeometry,

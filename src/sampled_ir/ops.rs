@@ -547,7 +547,9 @@ impl SampledImageOp {
             SampledImageOp::ToSepia => true,
             SampledImageOp::ToRGB => true,
             SampledImageOp::Invert => true,
-            SampledImageOp::Normalize { .. } => true,
+            // Normalize changes dtype (u8 -> f32): terminal barrier even
+            // though width/height are preserved.
+            SampledImageOp::Normalize { .. } => false,
             SampledImageOp::ColorTemperature { .. } => true,
             SampledImageOp::ChannelMix { .. } => true,
             SampledImageOp::ColorBalance { .. } => true,
@@ -632,7 +634,6 @@ impl SampledImageOp {
                 | SampledImageOp::Contrast { .. }
                 | SampledImageOp::Gamma { .. }
                 | SampledImageOp::Invert
-                | SampledImageOp::Normalize { .. }
                 | SampledImageOp::Posterize { .. }
                 | SampledImageOp::Solarize { .. }
         )
@@ -705,7 +706,8 @@ mod tests {
         assert!(SampledImageOp::Contrast { factor: 1.2 }.is_lut_op());
         assert!(SampledImageOp::Gamma { gamma: 0.8 }.is_lut_op());
         assert!(SampledImageOp::Invert.is_lut_op());
-        assert!(SampledImageOp::Normalize {
+        // Normalize produces float32 output: it is a terminal barrier, not a LUT op
+        assert!(!SampledImageOp::Normalize {
             mean: [0.5; 3],
             std: [0.5; 3]
         }
