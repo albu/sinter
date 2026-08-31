@@ -226,54 +226,203 @@ pub(super) fn execute_neon(affine: &Affine, image: &FusableImage) -> BarrierImag
                 let out_ptr = transformed_data.as_mut_ptr();
                 let max_x = in_width.saturating_sub(1) as u32;
                 let max_y = in_height.saturating_sub(1) as u32;
-                let iw = in_width as i32;
-                let ih = in_height as i32;
 
-                for y_out in 0..out_height {
-                    let mut x_fp = ((b * y_out as f32 + c) * 65536.0).round() as i64;
-                    let mut y_fp = ((e * y_out as f32 + f) * 65536.0).round() as i64;
-                    let row_out_idx = y_out * out_width;
-
-                    for x_out in 0..out_width {
-                        let x0 = (x_fp >> 16) as i32;
+                if dy_fp == 0 && dx_fp >= 0 {
+                    // Fast path: with a pure scale/translate affine the source row
+                    // is constant for the whole output row (dy_fp == 0) and source
+                    // x is monotonic (dx_fp >= 0). Process 8 output pixels per
+                    // iteration: one 16-byte window load per row, a vtbl gather
+                    // per corner, and u32 fixed-point bilinear blend. Bit-exact
+                    // with gray_bilinear_pixel (same arithmetic).
+                    for y_out in 0..out_height {
+                        let mut x_fp = ((b * y_out as f32 + c) * 65536.0).round() as i64;
+                        let y_fp = ((e * y_out as f32 + f) * 65536.0).round() as i64;
+                        let row_out_idx = y_out * out_width;
                         let y0 = (y_fp >> 16) as i32;
-                        let fx = ((x_fp >> 8) & 0xFF) as u32;
-                        let fy = ((y_fp >> 8) & 0xFF) as u32;
 
-                        let w00 = (256 - fx) * (256 - fy);
-                        let w10 = fx * (256 - fy);
-                        let w01 = (256 - fx) * fy;
-                        let w11 = fx * fy;
-
-                        let out_idx = row_out_idx + x_out;
-
-                        if (x0 as u32) < max_x && (y0 as u32) < max_y {
-                            unsafe {
-                                let top_ptr = in_ptr.add(y0 as usize * in_width + x0 as usize);
-                                let bot_ptr = top_ptr.add(in_width);
-
-                                let p00 = *top_ptr as u32;
-                                let p10 = *top_ptr.add(1) as u32;
-                                let p01 = *bot_ptr as u32;
-                                let p11 = *bot_ptr.add(1) as u32;
-
-                                let val = (p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11 + 32768) >> 16;
-                                *out_ptr.add(out_idx) = val as u8;
+                        if (y0 as u32) >= max_y {
+                            // Top/bottom border row: scalar (exactly like the
+                            // general path so borders stay bit-identical).
+                            for x_out in 0..out_width {
+                                let val = gray_bilinear_pixel(
+                                    data, in_width, in_height, x_fp, y_fp,
+                                    max_x, max_y, affine.border_mode,
+                                );
+                                unsafe { *out_ptr.add(row_out_idx + x_out) = val; }
+                                x_fp += dx_fp;
                             }
                         } else {
-                            let p00 = sample_single(data, iw, ih, 1, x0, y0, 0, affine.border_mode);
-                            let p10 = sample_single(data, iw, ih, 1, x0 + 1, y0, 0, affine.border_mode);
-                            let p01 = sample_single(data, iw, ih, 1, x0, y0 + 1, 0, affine.border_mode);
-                            let p11 = sample_single(data, iw, ih, 1, x0 + 1, y0 + 1, 0, affine.border_mode);
+                            let top_row = unsafe { in_ptr.add(y0 as usize * in_width) };
+                            let bot_row = unsafe { top_row.add(in_width) };
+                            let fy = ((y_fp >> 8) & 0xFF) as u32;
+                            let mut x_out = 0usize;
 
-                            let val = (p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11 + 32768) >> 16;
-                            unsafe {
-                                *out_ptr.add(out_idx) = val.min(255) as u8;
+                            while x_out < out_width {
+                                let x0 = (x_fp >> 16) as i32;
+                                if (x0 as u32) >= max_x {
+                                    // Left/right border pixel: scalar.
+                                    let val = gray_bilinear_pixel(
+                                        data, in_width, in_height, x_fp, y_fp,
+                                        max_x, max_y, affine.border_mode,
+                                    );
+                                    unsafe { *out_ptr.add(row_out_idx + x_out) = val; }
+                                    x_fp += dx_fp;
+                                    x_out += 1;
+                                    continue;
+                                }
+
+                                // Try an 8-pixel vector block.
+                                if x_out + 8 <= out_width {
+                                    let mut min_x0 = x0;
+                                    let mut max_x0 = x0;
+                                    let mut block_ok = true;
+                                    for i in 1..8 {
+                                        let x0i = ((x_fp + (i as i64) * dx_fp) >> 16) as i32;
+                                        if (x0i as u32) >= max_x {
+                                            block_ok = false;
+                                            break;
+                                        }
+                                        min_x0 = min_x0.min(x0i);
+                                        max_x0 = max_x0.max(x0i);
+                                    }
+                                    if block_ok
+                                        && (max_x0 - min_x0) <= 14
+                                        && (min_x0 + 15) < in_width as i32
+                                    {
+                                        unsafe {
+                                            let mut x0s = [0i32; 8];
+                                            let mut fxs = [0u8; 8];
+                                            for i in 0..8 {
+                                                let x_fp_i = x_fp + (i as i64) * dx_fp;
+                                                x0s[i] = (x_fp_i >> 16) as i32;
+                                                fxs[i] = ((x_fp_i >> 8) & 0xFF) as u8;
+                                            }
+                                            let off = x0s[0] as usize;
+                                            let top16 = vld1q_u8(top_row.add(off));
+                                            let bot16 = vld1q_u8(bot_row.add(off));
+
+                                            let mut idx_bytes = [0u8; 8];
+                                            for i in 0..8 {
+                                                idx_bytes[i] = (x0s[i] - x0s[0]) as u8;
+                                            }
+                                            let idx_v = vld1_u8(idx_bytes.as_ptr());
+                                            let idx1_v = vadd_u8(idx_v, vdup_n_u8(1));
+                                            let p00 = vqtbl1_u8(top16, idx_v);
+                                            let p10 = vqtbl1_u8(top16, idx1_v);
+                                            let p01 = vqtbl1_u8(bot16, idx_v);
+                                            let p11 = vqtbl1_u8(bot16, idx1_v);
+
+                                            let fx_v = vmovl_u8(vld1_u8(fxs.as_ptr()));
+                                            // Factored bilinear (bit-exact with the scalar
+                                            // formula by integer distributivity):
+                                            //   top = p00*(256-fx) + p10*fx   (u32)
+                                            //   bot = p01*(256-fx) + p11*fx   (u32)
+                                            //   val = (top*(256-fy) + bot*fy + 32768) >> 16
+                                            let ax_v = vsubq_u16(vdupq_n_u16(256), fx_v);
+                                            let p00_u16 = vmovl_u8(p00);
+                                            let p10_u16 = vmovl_u8(p10);
+                                            let p01_u16 = vmovl_u8(p01);
+                                            let p11_u16 = vmovl_u8(p11);
+
+                                            let top_lo = vmlal_u16(
+                                                vmull_u16(vget_low_u16(p00_u16), vget_low_u16(ax_v)),
+                                                vget_low_u16(p10_u16),
+                                                vget_low_u16(fx_v),
+                                            );
+                                            let top_hi = vmlal_u16(
+                                                vmull_u16(vget_high_u16(p00_u16), vget_high_u16(ax_v)),
+                                                vget_high_u16(p10_u16),
+                                                vget_high_u16(fx_v),
+                                            );
+                                            let bot_lo = vmlal_u16(
+                                                vmull_u16(vget_low_u16(p01_u16), vget_low_u16(ax_v)),
+                                                vget_low_u16(p11_u16),
+                                                vget_low_u16(fx_v),
+                                            );
+                                            let bot_hi = vmlal_u16(
+                                                vmull_u16(vget_high_u16(p01_u16), vget_high_u16(ax_v)),
+                                                vget_high_u16(p11_u16),
+                                                vget_high_u16(fx_v),
+                                            );
+
+                                            let fy_w = vdupq_n_u32(fy);
+                                            let fyc_w = vdupq_n_u32(256 - fy);
+                                            let acc_lo = vaddq_u32(
+                                                vmlaq_u32(vmulq_u32(top_lo, fyc_w), bot_lo, fy_w),
+                                                vdupq_n_u32(32768),
+                                            );
+                                            let acc_hi = vaddq_u32(
+                                                vmlaq_u32(vmulq_u32(top_hi, fyc_w), bot_hi, fy_w),
+                                                vdupq_n_u32(32768),
+                                            );
+
+                                            let r_lo = vqmovn_u32(vshrq_n_u32(acc_lo, 16));
+                                            let r_hi = vqmovn_u32(vshrq_n_u32(acc_hi, 16));
+                                            let r_u8 = vqmovn_u16(vcombine_u16(r_lo, r_hi));
+                                            vst1_u8(out_ptr.add(row_out_idx + x_out), r_u8);
+                                        }
+                                        x_fp += 8 * dx_fp;
+                                        x_out += 8;
+                                        continue;
+                                    }
+                                }
+
+                                // Non-conforming pixel (drift > 14 or tail): scalar.
+                                let val = gray_bilinear_pixel(
+                                    data, in_width, in_height, x_fp, y_fp,
+                                    max_x, max_y, affine.border_mode,
+                                );
+                                unsafe { *out_ptr.add(row_out_idx + x_out) = val; }
+                                x_fp += dx_fp;
+                                x_out += 1;
                             }
                         }
+                    }
+                } else {
+                    // General path (rotation/shear, or x-mirror affines): walk
+                    // each output row in 8-pixel blocks. Per lane the Q16
+                    // coordinates are stepped in SIMD; the block's 2x2 corners
+                    // live in a small source window that vqtbl4 gathers from
+                    // four 16-byte row loads. Blocks failing the window guard
+                    // (border lanes, span too large) fall back to
+                    // gray_bilinear_pixel, keeping the path bit-exact with the
+                    // scalar reference everywhere.
+                    for y_out in 0..out_height {
+                        let mut x_fp = ((b * y_out as f32 + c) * 65536.0).round() as i64;
+                        let mut y_fp = ((e * y_out as f32 + f) * 65536.0).round() as i64;
+                        let row_out_idx = y_out * out_width;
 
-                        x_fp += dx_fp;
-                        y_fp += dy_fp;
+                        let mut x_out = 0usize;
+                        while x_out < out_width {
+                            if x_out + 8 <= out_width
+                                && unsafe {
+                                    affine_gray_block8(
+                                        data,
+                                        out_ptr.add(row_out_idx + x_out),
+                                        in_width,
+                                        in_height,
+                                        x_fp,
+                                        y_fp,
+                                        dx_fp,
+                                        dy_fp,
+                                    )
+                                }
+                            {
+                                x_fp += 8 * dx_fp;
+                                y_fp += 8 * dy_fp;
+                                x_out += 8;
+                                continue;
+                            }
+
+                            let val = gray_bilinear_pixel(
+                                data, in_width, in_height, x_fp, y_fp,
+                                max_x, max_y, affine.border_mode,
+                            );
+                            unsafe { *out_ptr.add(row_out_idx + x_out) = val; }
+                            x_fp += dx_fp;
+                            y_fp += dy_fp;
+                            x_out += 1;
+                        }
                     }
                 }
             } else {
@@ -370,6 +519,197 @@ fn sample_single(data: &[u8], width: i32, height: i32, channels: usize, x: i32, 
             }
         }
     }
+}
+
+/// Scalar grayscale bilinear sample at fixed-point (x_fp, y_fp).
+///
+/// This is the bit-exact reference for the grayscale bilinear path: the NEON
+/// fast path reproduces the same arithmetic (`(sum + 32768) >> 16`, truncating
+/// x0/y0, `fx = (x_fp >> 8) & 0xFF`), so results match byte-for-byte.
+#[inline(always)]
+fn gray_bilinear_pixel(
+    data: &[u8],
+    in_width: usize,
+    in_height: usize,
+    x_fp: i64,
+    y_fp: i64,
+    max_x: u32,
+    max_y: u32,
+    mode: AffineBorderMode,
+) -> u8 {
+    let x0 = (x_fp >> 16) as i32;
+    let y0 = (y_fp >> 16) as i32;
+    let fx = ((x_fp >> 8) & 0xFF) as u32;
+    let fy = ((y_fp >> 8) & 0xFF) as u32;
+
+    let w00 = (256 - fx) * (256 - fy);
+    let w10 = fx * (256 - fy);
+    let w01 = (256 - fx) * fy;
+    let w11 = fx * fy;
+
+    if (x0 as u32) < max_x && (y0 as u32) < max_y {
+        let top = y0 as usize * in_width + x0 as usize;
+        let p00 = data[top] as u32;
+        let p10 = data[top + 1] as u32;
+        let p01 = data[top + in_width] as u32;
+        let p11 = data[top + in_width + 1] as u32;
+        ((p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11 + 32768) >> 16) as u8
+    } else {
+        let iw = in_width as i32;
+        let ih = in_height as i32;
+        let p00 = sample_single(data, iw, ih, 1, x0, y0, 0, mode);
+        let p10 = sample_single(data, iw, ih, 1, x0 + 1, y0, 0, mode);
+        let p01 = sample_single(data, iw, ih, 1, x0, y0 + 1, 0, mode);
+        let p11 = sample_single(data, iw, ih, 1, x0 + 1, y0 + 1, 0, mode);
+        ((p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11 + 32768) >> 16).min(255) as u8
+    }
+}
+
+/// Try to compute an 8-pixel bilinear block for the general affine path.
+///
+/// Writes 8 output pixels and returns true when every lane is interior and the
+/// block's source corners fit a 4x16-byte window table:
+///   - all corners strictly inside (x0 < w-1, y0 < h-1) so no border sampling,
+///   - x span <= 13 (so a corner's +1 column stays inside a table row),
+///   - y span <= 2 (so a corner's +1 row stays inside the 4-row table),
+///   - a 16-byte load at (min_x0, min_y0..min_y0+3) stays in bounds.
+/// Returns false writing nothing otherwise; the caller falls back to
+/// gray_bilinear_pixel, so the combined path stays bit-exact with the scalar
+/// reference (identical corners, weights, `(sum + 32768) >> 16` rounding).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn affine_gray_block8(
+    data: &[u8],
+    out_ptr: *mut u8,
+    in_width: usize,
+    in_height: usize,
+    x_fp: i64,
+    y_fp: i64,
+    dx_fp: i64,
+    dy_fp: i64,
+) -> bool {
+    // Q16 coordinates fit i32 for any image < ~32k pixels wide (coordinate
+    // magnitude is bounded by ~65536 * (dim + translate)).
+    let lane_off: [i32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    let off_lo = vld1q_s32(lane_off.as_ptr());
+    let off_hi = vld1q_s32(lane_off.as_ptr().add(4));
+
+    let x_lo = vaddq_s32(vdupq_n_s32(x_fp as i32), vmulq_n_s32(off_lo, dx_fp as i32));
+    let x_hi = vaddq_s32(vdupq_n_s32(x_fp as i32), vmulq_n_s32(off_hi, dx_fp as i32));
+    let y_lo = vaddq_s32(vdupq_n_s32(y_fp as i32), vmulq_n_s32(off_lo, dy_fp as i32));
+    let y_hi = vaddq_s32(vdupq_n_s32(y_fp as i32), vmulq_n_s32(off_hi, dy_fp as i32));
+
+    let x0_lo = vshrq_n_s32(x_lo, 16);
+    let x0_hi = vshrq_n_s32(x_hi, 16);
+    let y0_lo = vshrq_n_s32(y_lo, 16);
+    let y0_hi = vshrq_n_s32(y_hi, 16);
+
+    // x0/y0 are monotonic in the lane index (constant integer step), so the
+    // window bounds are just the block endpoints -- no horizontal reductions.
+    let x0_first = (x_fp >> 16) as i32;
+    let x0_last = ((x_fp + 7 * dx_fp) >> 16) as i32;
+    let y0_first = (y_fp >> 16) as i32;
+    let y0_last = ((y_fp + 7 * dy_fp) >> 16) as i32;
+    let (min_x0, max_x0) = if dx_fp >= 0 { (x0_first, x0_last) } else { (x0_last, x0_first) };
+    let (min_y0, max_y0) = if dy_fp >= 0 { (y0_first, y0_last) } else { (y0_last, y0_first) };
+
+    if min_x0 < 0
+        || min_y0 < 0
+        || max_x0 >= in_width as i32 - 1
+        || max_y0 >= in_height as i32 - 1
+        || min_x0 + 16 > in_width as i32
+        || max_x0 - min_x0 > 13
+        || max_y0 - min_y0 > 2
+        || min_y0 + 4 > in_height as i32
+    {
+        return false;
+    }
+
+    // Per-lane window table index: (y0 - min_y0)*16 + (x0 - min_x0) <= 2*16+13.
+    let xr16 = vcombine_u16(
+        vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(x0_lo, vdupq_n_s32(min_x0)))),
+        vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(x0_hi, vdupq_n_s32(min_x0)))),
+    );
+    let yr16 = vcombine_u16(
+        vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(y0_lo, vdupq_n_s32(min_y0)))),
+        vreinterpret_u16_s16(vqmovn_s32(vsubq_s32(y0_hi, vdupq_n_s32(min_y0)))),
+    );
+    let idx16 = vmlaq_u16(xr16, yr16, vdupq_n_u16(16));
+    let idx8 = vqmovn_u16(idx16);
+    let idx8_p1 = vadd_u8(idx8, vdup_n_u8(1));
+    let idx8_p16 = vadd_u8(idx8, vdup_n_u8(16));
+    let idx8_p17 = vadd_u8(idx8, vdup_n_u8(17));
+
+    let base = data.as_ptr().add(min_y0 as usize * in_width + min_x0 as usize);
+    let t0 = vld1q_u8(base);
+    let t1 = vld1q_u8(base.add(in_width));
+    let t2 = vld1q_u8(base.add(2 * in_width));
+    let t3 = vld1q_u8(base.add(3 * in_width));
+
+    let tbl = uint8x16x4_t(t0, t1, t2, t3);
+    let p00 = vqtbl4_u8(tbl, idx8);
+    let p10 = vqtbl4_u8(tbl, idx8_p1);
+    let p01 = vqtbl4_u8(tbl, idx8_p16);
+    let p11 = vqtbl4_u8(tbl, idx8_p17);
+
+    // Fractional parts: (fp >> 8) & 0xFF per lane.
+    let fx16 = vcombine_u16(
+        vreinterpret_u16_s16(vqmovn_s32(vandq_s32(vshrq_n_s32(x_lo, 8), vdupq_n_s32(0xFF)))),
+        vreinterpret_u16_s16(vqmovn_s32(vandq_s32(vshrq_n_s32(x_hi, 8), vdupq_n_s32(0xFF)))),
+    );
+    let fy16 = vcombine_u16(
+        vreinterpret_u16_s16(vqmovn_s32(vandq_s32(vshrq_n_s32(y_lo, 8), vdupq_n_s32(0xFF)))),
+        vreinterpret_u16_s16(vqmovn_s32(vandq_s32(vshrq_n_s32(y_hi, 8), vdupq_n_s32(0xFF)))),
+    );
+
+    // Factored two-lerp, bit-exact with the scalar formula by integer
+    // distributivity: (p00*w00 + p10*w10 + p01*w01 + p11*w11 + 32768) >> 16.
+    let ax16 = vsubq_u16(vdupq_n_u16(256), fx16);
+    let p00_16 = vmovl_u8(p00);
+    let p10_16 = vmovl_u8(p10);
+    let p01_16 = vmovl_u8(p01);
+    let p11_16 = vmovl_u8(p11);
+
+    let top_lo = vmlal_u16(
+        vmull_u16(vget_low_u16(p00_16), vget_low_u16(ax16)),
+        vget_low_u16(p10_16),
+        vget_low_u16(fx16),
+    );
+    let top_hi = vmlal_u16(
+        vmull_u16(vget_high_u16(p00_16), vget_high_u16(ax16)),
+        vget_high_u16(p10_16),
+        vget_high_u16(fx16),
+    );
+    let bot_lo = vmlal_u16(
+        vmull_u16(vget_low_u16(p01_16), vget_low_u16(ax16)),
+        vget_low_u16(p11_16),
+        vget_low_u16(fx16),
+    );
+    let bot_hi = vmlal_u16(
+        vmull_u16(vget_high_u16(p01_16), vget_high_u16(ax16)),
+        vget_high_u16(p11_16),
+        vget_high_u16(fx16),
+    );
+
+    let fy32_lo = vmovl_u16(vget_low_u16(fy16));
+    let fy32_hi = vmovl_u16(vget_high_u16(fy16));
+    let fyc_lo = vsubq_u32(vdupq_n_u32(256), fy32_lo);
+    let fyc_hi = vsubq_u32(vdupq_n_u32(256), fy32_hi);
+    let acc_lo = vaddq_u32(
+        vmlaq_u32(vmulq_u32(top_lo, fyc_lo), bot_lo, fy32_lo),
+        vdupq_n_u32(32768),
+    );
+    let acc_hi = vaddq_u32(
+        vmlaq_u32(vmulq_u32(top_hi, fyc_hi), bot_hi, fy32_hi),
+        vdupq_n_u32(32768),
+    );
+
+    let res = vcombine_u16(
+        vqmovn_u32(vshrq_n_u32(acc_lo, 16)),
+        vqmovn_u32(vshrq_n_u32(acc_hi, 16)),
+    );
+    vst1_u8(out_ptr, vqmovn_u16(res));
+    true
 }
 
 #[inline(always)]

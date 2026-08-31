@@ -1,8 +1,122 @@
 // Tests for Affine transform
 
 use super::interpolation::bilinear_interpolate;
+use super::rust_impl::execute_rust;
 use super::{Affine, AffineBorderMode, AffineInterpolation, AffineParams};
 use crate::core::{AccessPattern, Executable, FusableImage, ShapeEffect, Transform};
+
+fn gray_data(width: usize, height: usize) -> Vec<u8> {
+    let mut data = vec![0u8; width * height];
+    // Deterministic pseudo-random pattern (including exact 0..255 extremes).
+    let mut x = 0x9E3779B97F4A7C15u64;
+    for v in data.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *v = ((x >> 32) % 256) as u8;
+    }
+    data
+}
+
+fn rgb_data(width: usize, height: usize) -> Vec<u8> {
+    let mut data = vec![0u8; width * height * 3];
+    let mut x = 0x2545F4914F6CDD1Du64;
+    for v in data.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *v = ((x >> 33) % 256) as u8;
+    }
+    data
+}
+
+fn assert_execute_matches_scalar(
+    affine: &Affine,
+    data: &mut Vec<u8>,
+    width: usize,
+    height: usize,
+    channels: usize,
+) {
+    let src = data.clone();
+    let neon_out = {
+        let mut img = FusableImage::new(data.as_mut_slice(), width, height, channels);
+        affine.execute(&mut img).unwrap()
+    };
+    let mut scalar_data = src;
+    let scalar_out = {
+        let mut img = FusableImage::new(scalar_data.as_mut_slice(), width, height, channels);
+        execute_rust(affine, &mut img)
+    };
+    assert_eq!(neon_out.width, scalar_out.width, "width mismatch");
+    assert_eq!(neon_out.height, scalar_out.height, "height mismatch");
+    assert_eq!(neon_out.channels, scalar_out.channels, "channels mismatch");
+    assert_eq!(
+        neon_out.data, scalar_out.data,
+        "NEON (or scalar) path diverged from scalar reference for params {:?}",
+        affine.params
+    );
+    *data = scalar_data;
+}
+
+#[test]
+fn test_affine_gray_bilinear_neon_matches_scalar_reference() {
+    let sizes = [(16usize, 16usize), (37, 53), (64, 64), (65, 67), (9, 9), (8, 8), (71, 40)];
+    let params: &[AffineParams] = &[
+        // Fast path: pure scale/translate (dy_fp == 0, dx_fp >= 0)
+        AffineParams { scale: (1.5, 1.5), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        AffineParams { scale: (1.0, 1.0), rotate: 0.0, translate: (3.5, -2.25), shear: (0.0, 0.0) },
+        AffineParams { scale: (0.75, 0.75), rotate: 0.0, translate: (1.0, 1.0), shear: (0.0, 0.0) },
+        AffineParams { scale: (0.5, 0.5), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        AffineParams { scale: (2.0, 0.9), rotate: 0.0, translate: (-4.0, 6.0), shear: (0.0, 0.0) },
+        AffineParams { scale: (1.0, 1.0), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        // General path: rotation / shear (dy_fp != 0)
+        AffineParams { scale: (1.5, 1.5), rotate: 30.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        AffineParams { scale: (1.0, 1.0), rotate: 15.0, translate: (2.0, -3.0), shear: (0.2, 0.0) },
+        // General path: shallow rotation (long constant-y0 runs, span-1 blocks)
+        AffineParams { scale: (1.0, 1.0), rotate: 3.5, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        // General path: steep rotation (y span > 2 per 8 px -> scalar fallback)
+        AffineParams { scale: (2.0, 2.0), rotate: 75.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        // General path: rotation + shear mix
+        AffineParams { scale: (1.3, 1.3), rotate: 45.0, translate: (0.0, 0.0), shear: (5.0, -5.0) },
+        // General path: x-mirror (dx_fp < 0)
+        AffineParams { scale: (-1.0, 1.0), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+        // Zoom-out that drifts > 14 source pixels per 8 output pixels (scalar
+        // fallback inside the fast-row structure).
+        AffineParams { scale: (0.2, 0.2), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) },
+    ];
+    let borders = [
+        AffineBorderMode::Replicate,
+        AffineBorderMode::Reflect,
+        AffineBorderMode::Wrap,
+        AffineBorderMode::Constant { value: 7 },
+    ];
+
+    for &(w, h) in &sizes {
+        for p in params {
+            for &border in &borders {
+                let a = Affine::with_all(*p, w, h, AffineInterpolation::Bilinear, border);
+                let mut data = gray_data(w, h);
+                assert_execute_matches_scalar(&a, &mut data, w, h, 1);
+            }
+        }
+    }
+
+    // Output-size variants (shape-changing) on a couple of fast-path params.
+    for p in &params[..3] {
+        let a = Affine::with_output_size_and_interpolation(*p, 77, 63, AffineInterpolation::Bilinear);
+        let mut data = gray_data(40, 50);
+        assert_execute_matches_scalar(&a, &mut data, 40, 50, 1);
+    }
+}
+
+#[test]
+fn test_affine_rgb_bilinear_unchanged_by_gray_fast_path() {
+    // Regression guard: the gray fast path must not affect the RGB path.
+    let params = AffineParams { scale: (1.5, 1.5), rotate: 0.0, translate: (0.0, 0.0), shear: (0.0, 0.0) };
+    let a = Affine::with_all(params, 64, 64, AffineInterpolation::Bilinear, AffineBorderMode::Replicate);
+    let mut data = rgb_data(64, 64);
+    assert_execute_matches_scalar(&a, &mut data, 64, 64, 3);
+}
 
 #[test]
 fn test_affine_new() {
