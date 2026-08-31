@@ -7,7 +7,7 @@ name = "sinter"
 version = "0.2.0"
 description = "Research prototype for compiler-based image augmentation optimization"
 requires-python = ">=3.8"
-license = {text = "CC-BY-NC-SA-4.0"}  # Research/educational use only, see LICENSE
+license = {text = "MIT OR Apache-2.0"}
 dependencies = [
     "numpy>=1.20",
 ]

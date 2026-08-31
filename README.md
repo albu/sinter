@@ -8,7 +8,7 @@
   <i>A compiler-accelerated image augmentation engine in pure Rust + SIMD</i>
 </p>
 
-[![License: CC-BY-NC-SA 4.0](https://img.shields.io/badge/license-CC--BY--NC--SA%204.0-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 
 ---
@@ -352,4 +352,4 @@ From a co-creator of [Albumentations](https://github.com/albumentations-team/alb
 
 ## License
 
-Creative Commons BY-NC-SA 4.0 - See [LICENSE](LICENSE)
+Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your option.
