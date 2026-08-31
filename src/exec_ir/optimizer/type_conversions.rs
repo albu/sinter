@@ -194,33 +194,13 @@ fn try_sampled_as_matrix_op(
             // tint is [f32; 4] = [target_r, target_g, target_b, intensity]
             Some(Box::new(ColorTint::new(tint[0], tint[1], tint[2], tint[3])))
         }
-        SampledImageOp::HueSaturationValue {
-            hue_shift,
-            saturation_scale,
-            value_scale,
-        } if *hue_shift == 0 => {
-            let s = *saturation_scale;
-            let v = *value_scale;
-            let om_s = 1.0 - s;
-            let r_r = (om_s * 0.299 + s) * v;
-            let r_g = (om_s * 0.587) * v;
-            let r_b = (om_s * 0.114) * v;
-
-            let g_r = (om_s * 0.299) * v;
-            let g_g = (om_s * 0.587 + s) * v;
-            let g_b = (om_s * 0.114) * v;
-
-            let b_r = (om_s * 0.299) * v;
-            let b_g = (om_s * 0.587) * v;
-            let b_b = (om_s * 0.114 + s) * v;
-
-            let matrix = [
-                [r_r, r_g, r_b],
-                [g_r, g_g, g_b],
-                [b_r, b_g, b_b],
-            ];
-            Some(Box::new(ChannelMix::new(matrix)))
-        }
+        // HueSaturationValue with hue_shift == 0 is intentionally NOT converted
+        // to a matrix here: the exact sat/val transform is
+        //   RGB' = vs*ss*RGB + vs*(1-ss)*V*[1,1,1]  (V = max)
+        // which has a per-pixel max term (plus an S/V clip for ss>1 or vs>1),
+        // so it is not a linear map and cannot be matrix-fused without
+        // changing results. The old luma-weighted approximation (0.299/0.587/
+        // 0.114) disagreed with the hue-shift path by up to ~50 and was removed.
         _ => None,
     }
 }

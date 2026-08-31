@@ -232,32 +232,28 @@ fn test_matrix_fusion_divergence_bounded() {
     let mut img1 = FusableImage::new(&mut data1_clone, 100, 100, 3);
     let mut img2 = FusableImage::new(&mut data2_clone, 100, 100, 3);
 
-    // Sequential (production executors: MatrixExecutor for ToSepia/HSV, float
-    // apply_matrix for ColorTemperature -- each op clamps to [0,255]).
+    // Sequential (production executors: MatrixExecutor for ToSepia/ChannelMix,
+    // float apply_matrix for ColorTemperature -- each op clamps to [0,255]).
     Executable::execute(&ToSepia, &mut img1);
     Executable::execute(&ColorTemperature::new(50.0), &mut img1);
-    Executable::execute(
-        &HueSaturationValue {
-            hue_shift: 0.0,
-            sat_scale: 1.2,
-            val_scale: 1.1,
-        },
-        &mut img1,
-    );
+    Executable::execute(&ChannelMix::new([
+        [0.5, 0.3, 0.2],
+        [0.1, 0.6, 0.3],
+        [0.2, 0.2, 0.6],
+    ]), &mut img1);
 
     // Fused: compose once, apply once (Q8 SIMD, clamp at the end).
-    let s = 1.2f32;
-    let v = 1.1f32;
-    let om_s = 1.0 - s;
-    let hsv = [
-        [(om_s * 0.299 + s) * v, om_s * 0.587 * v, om_s * 0.114 * v],
-        [om_s * 0.299 * v, (om_s * 0.587 + s) * v, om_s * 0.114 * v],
-        [om_s * 0.299 * v, om_s * 0.587 * v, (om_s * 0.114 + s) * v],
-    ];
+    // Note: HueSaturationValue(hue=0) is no longer matrix-fused (it is not a
+    // linear map under the exact hexcone semantics), so this chain uses a
+    // plain ChannelMix instead.
     let ops: Vec<Box<dyn MatrixOp>> = vec![
         Box::new(ToSepia),
         Box::new(ColorTemperature::new(50.0)),
-        Box::new(ChannelMix::new(hsv)),
+        Box::new(ChannelMix::new([
+            [0.5, 0.3, 0.2],
+            [0.1, 0.6, 0.3],
+            [0.2, 0.2, 0.6],
+        ])),
     ];
     let refs: Vec<&dyn MatrixOp> = ops.iter().map(|b| b.as_ref()).collect();
     let fused = FusedMatrix::from_matrix_ops(&refs);

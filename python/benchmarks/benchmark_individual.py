@@ -281,6 +281,9 @@ def run_benchmarks():
             print_row("ToRGB", albumentations_time, sinter_time, speedup)
 
         # Saturation - Albumentations has HueSaturationValue, use fixed sat_shift_limit for comparison
+        # NOTE: semantics differ — alb applies ADDITIVE shifts in cv2 HSV space
+        # (sat += 30/255), sinter applies MULTIPLICATIVE scales (sat *= 1.3).
+        # The ratio is op-vs-op timing, not a like-for-like comparison.
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
                 "HueSaturationValue",
@@ -375,6 +378,9 @@ def run_benchmarks():
             print_row("MultiplicativeNoise", albumentations_time, sinter_time, speedup)
 
         # HueSaturationValue - Albumentations equivalent exists
+        # NOTE: semantics differ — alb uses additive shifts (hue+10 in 0..179,
+        # sat+10, val+10 in 0..255), sinter uses hue_shift degrees + multiplicative
+        # sat/val scales. The ratio is op-vs-op timing, not like-for-like.
         if HAS_ALBUMENTATIONS:
             albumentations_time, sinter_time, speedup = benchmark_transform(
                 "HueSaturationValue",

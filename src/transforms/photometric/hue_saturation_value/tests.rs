@@ -194,3 +194,32 @@ fn test_hsv_fast_simd_batch() {
         assert!(img.data[i * 3 + 2] < 10, "Pixel {} B too high: {}", i, b);
     }
 }
+
+#[test]
+fn test_hsv_satval_consistent_with_hue_path_hexcone() {
+    // Regression: the hue==0 branch used a luma-weighted matrix
+    // (0.299/0.587/0.114) that disagreed with the hue-shift SIMD path by up to
+    // ~50. It must now produce the exact hexcone result, including the S/V
+    // clipping regimes. Expected values computed from the brute-force HSV
+    // round-trip (C = V*S/255 = V - min, X = C*(U-L)/C, m = V - C).
+
+    // Saturation boost with S clipping (ss=1.3): (200,100,150) -> (200,70,135)
+    let mut data = vec![200u8, 100, 150];
+    let mut img = FusableImage::new(&mut data, 1, 1, 3);
+    HueSaturationValue::new(0.0, 1.3, 1.0).execute(&mut img);
+    assert_eq!(img.data, vec![200, 70, 135], "sat-only ss=1.3 clip");
+
+    // Value boost with V clipping (vs=1.2): (255,14,1) -> (255,62,52)
+    let mut data = vec![255u8, 14, 1];
+    let mut img = FusableImage::new(&mut data, 1, 1, 3);
+    HueSaturationValue::new(0.0, 0.8, 1.2).execute(&mut img);
+    assert_eq!(img.data, vec![255, 62, 52], "sat+val ss=0.8 vs=1.2 clip");
+
+    // No-clip regime stays on the fast Q8.8 path: ss=0.8, vs=0.8.
+    // (200,100,150): R max, B mid, G min. V'=160, C'=64, X'=32, m'=96
+    // -> R 160, G 96, B 128.
+    let mut data = vec![200u8, 100, 150];
+    let mut img = FusableImage::new(&mut data, 1, 1, 3);
+    HueSaturationValue::new(0.0, 0.8, 0.8).execute(&mut img);
+    assert_eq!(img.data, vec![160, 96, 128], "sat-only ss=0.8 vs=0.8 no-clip");
+}
