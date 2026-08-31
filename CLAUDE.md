@@ -106,14 +106,17 @@ pipeline = Compose([
     Contrast(factor=Constant(1.2)),
 ])
 
-# Apply directly to numpy arrays
+# Apply directly to numpy arrays (copy-by-default: img_array is NOT modified)
 img_array = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
-result = pipeline.apply(img_array.copy())
+result = pipeline.apply(img_array)
+
+# Zero-copy opt-in when the input buffer is disposable
+fast = pipeline.apply(img_array, inplace=True)
 
 # Sample once for deterministic reuse
 sampled = pipeline.sample_with_seed(42)
-result1 = sampled.apply(img1.copy())
-result2 = sampled.apply(img2.copy())
+result1 = sampled.apply(img1)
+result2 = sampled.apply(img2)
 ```
 
 ## Architecture Overview
@@ -159,25 +162,22 @@ Quick summary:
 
 ## Common Pitfalls
 
-### ALWAYS Use `.copy()` When Applying Transforms
+### Memory Semantics: Copy-By-Default, `inplace=True` To Opt Out
 
-**NEVER forget `.copy()` - transforms modify arrays in-place!**
+`apply(...)` and `__call__(...)` default to `inplace=False`: the input array is **never** modified (the engine copies it first). Pass `inplace=True` for zero-copy in-place execution when the input buffer is disposable.
 
 ```python
-# ❌ WRONG - modifies the original array!
+# Default (safe): returns a new array, img_array is untouched
 result = pipeline.apply(img_array)
-print(img_array.mean())  # This has been modified!
 
-# ✅ CORRECT - preserves the original
-result = pipeline.apply(img_array.copy())
-print(img_array.mean())  # Original is unchanged
+# Fast path: mutates img_array in place, zero allocations
+result = pipeline.apply(img_array, inplace=True)  # img_array is now modified!
 ```
 
-**Why this happens**: Most transforms are `InPlace` - they modify the input array directly without allocating a new buffer. This is a performance optimization.
+**Why**: transforms execute `InPlace` on the working buffer; the safe default pays one array copy (~0.06 ms at 1024x1024 RGB), `inplace=True` skips it.
 
-**Symptoms of this bug**:
-- Unexpected values in your "original" array
-- Multiple transforms affecting each other's inputs
-- Data corruption when reusing arrays
+**Return-value convention**:
+- `apply(...)` and a bare `transform(image)` call return the transformed **array**
+- Passing label targets (`bboxes=`/`keypoints=`/`masks=`) or calling `Compose(image, ...)` returns a **dict** of targets
 
-**Lesson**: Always use `.copy()` unless you explicitly want to modify the original!
+**Symptoms of ignoring this**: passing `inplace=True` on a buffer you still need, then reading stale/mutated values from the "original".

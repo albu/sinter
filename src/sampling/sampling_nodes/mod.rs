@@ -7,7 +7,7 @@
 // Vec<SampledImageOp> to the SampledImageProgram.
 
 use crate::core::{AccessPattern, ShapeEffect};
-use crate::sampled_ir::ops::{EdgeMethod, EmbossDirection, Interpolation, PadMode, RotateAngle};
+use crate::sampled_ir::ops::{BorderMode, EdgeMethod, EmbossDirection, Interpolation, PadMode, RotateAngle};
 use crate::sampled_ir::SampledImageOp;
 
 // Re-export distributions for use in sampling
@@ -68,6 +68,7 @@ impl<'a> SamplingContext<'a> {
 /// - No allocation during sampling (just reads enum variants)
 /// - No vtable lookups (pattern matching on enum)
 /// - Cache-friendly (sequential memory access)
+#[derive(Clone)]
 pub enum RandomImageNode {
     // =========================================================================
     // Leaf Transforms (Parameters only, NO activation)
@@ -105,6 +106,7 @@ pub enum RandomImageNode {
         translate: (Dist, Dist), // (translate_x, translate_y) in pixels
         shear: (Dist, Dist),     // (shear_x, shear_y)
         interpolation: Interpolation,
+        border_mode: BorderMode,
     },
 
     // Photometric transforms
@@ -339,6 +341,7 @@ impl RandomImageNode {
                 translate,
                 shear,
                 interpolation,
+                border_mode,
             } => {
                 let sampled_scale_x = scale.0.sample_f32(ctx.rng);
                 let sampled_scale_y = scale.1.sample_f32(ctx.rng);
@@ -348,15 +351,13 @@ impl RandomImageNode {
                 let sampled_shear_x = shear.0.sample_f32(ctx.rng);
                 let sampled_shear_y = shear.1.sample_f32(ctx.rng);
 
-                let border_mode = crate::sampled_ir::ops::BorderMode::Constant { value: 0 };
-
                 out.push(SampledImageOp::Affine {
                     scale: (sampled_scale_x, sampled_scale_y),
                     rotate: sampled_rotate,
                     translate: (sampled_translate_x, sampled_translate_y),
                     shear: (sampled_shear_x, sampled_shear_y),
                     interpolation: *interpolation,
-                    border_mode,
+                    border_mode: *border_mode,
                 });
             }
 
@@ -774,6 +775,7 @@ fn sample_indices(rng: &mut dyn Rng, n: usize, k: usize) -> Vec<usize> {
 /// This is the user-facing type that holds random transforms before sampling.
 /// It contains a `RandomImageNode` tree which can be sampled to produce
 /// a deterministic `SampledImageProgram`.
+#[derive(Clone)]
 pub struct RandomImageProgram {
     /// The root node (typically All)
     root: RandomImageNode,

@@ -156,6 +156,7 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
 
     // Sampled IR
     m.add_class::<PySampledImageProgram>()?;
+    m.add("SampledImageProgram", m.getattr("_SampledImageProgram")?)?;
 
     // Batch transforms
     register_classes!(m, PyMixUp, PyCutMix, PyMosaic, PyBatchPipeline,);

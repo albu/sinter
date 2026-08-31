@@ -211,6 +211,17 @@ impl PyNormal {
 // Conversion helper
 // =============================================================================
 
+/// Format a Dist for readable __repr__ output
+pub fn format_dist(dist: &Dist) -> String {
+    match dist {
+        Dist::Constant(v) => format!("{}", v),
+        Dist::Uniform { min, max } => format!("Uniform({}, {})", min, max),
+        Dist::UniformInt { min, max } => format!("UniformInt({}, {})", min, max),
+        Dist::Bernoulli { p } => format!("Bernoulli({})", p),
+        Dist::Normal { mu, sigma } => format!("Normal({}, {})", mu, sigma),
+    }
+}
+
 /// Parse a Python value to a Dist
 ///
 /// This helper function attempts to convert a Python value to a Dist enum.
@@ -220,7 +231,8 @@ impl PyNormal {
 /// 3. PyUniformInt -> Dist::UniformInt
 /// 4. PyBernoulli -> Dist::Bernoulli
 /// 5. PyNormal -> Dist::Normal
-/// 6. Plain f32/i32 -> Dist::Constant (implicit conversion)
+/// 6. (min, max) tuple or list of 2 numbers -> Dist::Uniform
+/// 7. Plain f32/i32 -> Dist::Constant (implicit conversion)
 #[cfg(feature = "python")]
 pub fn parse_distribution(value: &PyAny) -> PyResult<Dist> {
     // Try distribution objects first
@@ -240,6 +252,30 @@ pub fn parse_distribution(value: &PyAny) -> PyResult<Dist> {
         return Ok(Dist::Normal { mu: n.mu, sigma: n.sigma });
     }
 
+    // Try tuple (min, max)
+    if let Ok((min, max)) = value.extract::<(f32, f32)>() {
+        if min >= max {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Uniform: min ({}) must be less than max ({})", min, max)
+            ));
+        }
+        return Ok(Dist::Uniform { min, max });
+    }
+
+    // Try list [min, max]
+    if let Ok(vec) = value.extract::<Vec<f32>>() {
+        if vec.len() == 2 {
+            let min = vec[0];
+            let max = vec[1];
+            if min >= max {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Uniform: min ({}) must be less than max ({})", min, max)
+                ));
+            }
+            return Ok(Dist::Uniform { min, max });
+        }
+    }
+
     // Implicit: plain number becomes Constant
     if let Ok(v) = value.extract::<f32>() {
         return Ok(Dist::Constant(v));
@@ -250,7 +286,7 @@ pub fn parse_distribution(value: &PyAny) -> PyResult<Dist> {
 
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         format!(
-            "Expected a distribution (Constant, Uniform, Bernoulli, Normal) or a number, got {}",
+            "Expected a distribution (Constant, Uniform, Bernoulli, Normal), a (min, max) tuple, or a number, got {}",
             value.get_type().name()?
         )
     ))

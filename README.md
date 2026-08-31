@@ -242,15 +242,18 @@ import numpy as np
 pipeline = Compose([
     Brightness(delta=50.0),
     Contrast(factor=0.2),
-    Gamma(power=1.5),
+    Gamma(gamma=1.5),
 ])
 
-# Apply to numpy arrays
+# Apply directly to numpy arrays (safe copy-by-default)
 img = np.random.randint(0, 256, (512, 512, 3), dtype=np.uint8)
-result = pipeline.apply(img.copy())
+result = pipeline.apply(img)
+
+# For maximum zero-copy throughput when reusing buffers:
+result_fast = pipeline.apply(img, inplace=True)
 ```
 
-**Note**: Most transforms mutate in-place for performance. Always `.copy()` your input if you need to preserve the original.
+**Memory Semantics**: By default, Sinter uses safe memory semantics (`inplace=False`), so your original image arrays are never modified. To enable zero-copy execution without buffer allocation, pass `inplace=True`.
 
 ---
 

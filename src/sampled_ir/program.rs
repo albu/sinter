@@ -154,6 +154,107 @@ impl SampledImageProgram {
         }
         summary
     }
+
+    /// Generate a Mermaid flowchart markdown diagram of the optimized execution plan
+    pub fn to_mermaid(&self, direction: Option<&str>) -> String {
+        use crate::exec_ir::ExecNodeKind;
+        use crate::exec_ir::Optimizer;
+
+        let dir = direction.unwrap_or("LR");
+        let plan = self.to_plan();
+        let exec_plan = Optimizer::new().optimize(plan);
+
+        let num_ops = self.len();
+        let num_nodes = exec_plan.len();
+        let fusion_pct = if num_ops > 0 {
+            ((num_ops.saturating_sub(num_nodes)) as f64 / num_ops as f64 * 100.0) as i32
+        } else {
+            0
+        };
+
+        let mut out = String::new();
+        out.push_str(&format!("flowchart {}\n", dir));
+        out.push_str(&format!(
+            "    %% Optimization: {} transforms -> {} execution nodes ({}% fusion)\n",
+            num_ops, num_nodes, fusion_pct
+        ));
+        out.push_str("    Input([\"Input Image\"])\n");
+
+        if exec_plan.nodes.is_empty() {
+            out.push_str("    Input --> Output([\"Transformed Image\"])\n");
+            return out;
+        }
+
+        let mut prev_target = "Input".to_string();
+        let mut global_op_idx = 0;
+
+        for (i, node) in exec_plan.nodes.iter().enumerate() {
+            match &node.kind {
+                ExecNodeKind::Fused(ops) => {
+                    if ops.len() > 1 {
+                        let subgraph_id = format!("Pass{}", i + 1);
+                        out.push_str(&format!(
+                            "\n    subgraph {} [\"Pass {}: Fused Block ({} ops)\"]\n",
+                            subgraph_id,
+                            i + 1,
+                            ops.len()
+                        ));
+                        out.push_str(&format!("        direction {}\n", dir));
+                        let mut first_op_id = String::new();
+                        let mut last_op_id = String::new();
+
+                        for (j, op) in ops.iter().enumerate() {
+                            let op_id = format!("Op{}", global_op_idx);
+                            global_op_idx += 1;
+                            let op_name = format!("{:?}", op);
+                            let clean_name = op_name.replace('"', "'");
+                            out.push_str(&format!("        {}[\"{}\"]\n", op_id, clean_name));
+                            if j == 0 {
+                                first_op_id = op_id.clone();
+                            } else {
+                                out.push_str(&format!("        {} --> {}\n", last_op_id, op_id));
+                            }
+                            last_op_id = op_id;
+                        }
+                        out.push_str("    end\n");
+                        out.push_str(&format!("    {} --> {}\n", prev_target, first_op_id));
+                        prev_target = last_op_id;
+                    } else if ops.len() == 1 {
+                        let op_id = format!("Op{}", global_op_idx);
+                        global_op_idx += 1;
+                        let clean_name = format!("{:?}", ops[0]).replace('"', "'");
+                        out.push_str(&format!(
+                            "    {}[\"Pass {}: {}\"]\n",
+                            op_id,
+                            i + 1,
+                            clean_name
+                        ));
+                        out.push_str(&format!("    {} --> {}\n", prev_target, op_id));
+                        prev_target = op_id;
+                    }
+                }
+                ExecNodeKind::Barrier(op) => {
+                    let op_id = format!("Barrier{}", global_op_idx);
+                    global_op_idx += 1;
+                    let clean_name = format!("{:?}", op).replace('"', "'");
+                    out.push_str(&format!(
+                        "    {}[\"Pass {}: Barrier ({})\"]\n",
+                        op_id,
+                        i + 1,
+                        clean_name
+                    ));
+                    out.push_str(&format!("    {} --> {}\n", prev_target, op_id));
+                    prev_target = op_id;
+                }
+            }
+        }
+
+        out.push_str(&format!(
+            "    {} --> Output([\"Transformed Image\"])\n",
+            prev_target
+        ));
+        out
+    }
 }
 
 impl Default for SampledImageProgram {
@@ -171,12 +272,52 @@ impl SampledImageProgram {
 
     /// Apply the program to a set of bounding boxes
     ///
-    /// # Arguments
-    /// - `bboxes`: List of [x, y, w, h] bounding boxes
-    /// - `image_size`: Initial (width, height) of the image
+    /// Create a geometric-only version of this program for transforming masks.
     ///
-    /// # Returns
-    /// - List of transformed bounding boxes. Boxes that are clipped/removed are excluded.
+    /// Filters out all photometric/color/noise operations and forces
+    /// Nearest-Neighbor interpolation on resize/affine ops so integer mask
+    /// class labels are preserved without blending artifacts.
+    pub fn geometric_program(&self) -> SampledImageProgram {
+        use crate::sampled_ir::ops::{Interpolation, SampledImageOp};
+        let mut geom_ops = Vec::new();
+        for op in &self.ops {
+            match op {
+                SampledImageOp::Resize { width, height, .. } => {
+                    geom_ops.push(SampledImageOp::Resize {
+                        width: *width,
+                        height: *height,
+                        interpolation: Interpolation::Nearest,
+                    });
+                }
+                SampledImageOp::Affine {
+                    scale,
+                    rotate,
+                    translate,
+                    shear,
+                    border_mode,
+                    ..
+                } => {
+                    geom_ops.push(SampledImageOp::Affine {
+                        scale: *scale,
+                        rotate: *rotate,
+                        translate: *translate,
+                        shear: *shear,
+                        interpolation: Interpolation::Nearest,
+                        border_mode: *border_mode,
+                    });
+                }
+                op if op.to_label_transform().is_some() => {
+                    geom_ops.push(op.clone());
+                }
+                _ => {}
+            }
+        }
+        SampledImageProgram {
+            version: self.version,
+            ops: geom_ops,
+        }
+    }
+
     /// Apply the program to a set of bounding boxes
     ///
     /// # Arguments
@@ -190,6 +331,19 @@ impl SampledImageProgram {
         bboxes: Vec<[f32; 4]>,
         image_size: (u32, u32),
     ) -> (Vec<[f32; 4]>, (u32, u32)) {
+        let with_extra: Vec<([f32; 4], Vec<f32>)> =
+            bboxes.into_iter().map(|b| (b, Vec::new())).collect();
+        let (transformed, final_size) = self.apply_to_bboxes_with_extra(with_extra, image_size);
+        let boxes = transformed.into_iter().map(|(b, _)| b).collect();
+        (boxes, final_size)
+    }
+
+    /// Apply the program to bounding boxes with extra payload (e.g. class_id, score)
+    pub fn apply_to_bboxes_with_extra(
+        &self,
+        bboxes: Vec<([f32; 4], Vec<f32>)>,
+        image_size: (u32, u32),
+    ) -> (Vec<([f32; 4], Vec<f32>)>, (u32, u32)) {
         let mut current_bboxes = bboxes;
         let mut current_w = image_size.0;
         let mut current_h = image_size.1;
@@ -198,9 +352,9 @@ impl SampledImageProgram {
             // 1. Apply geometric transform if applicable
             if let Some(lbl_transform) = op.to_label_transform() {
                 let mut next_bboxes = Vec::with_capacity(current_bboxes.len());
-                for bbox in current_bboxes {
+                for (bbox, extra) in current_bboxes {
                     if let Some(new_bbox) = lbl_transform.map_bbox(bbox, (current_w, current_h)) {
-                        next_bboxes.push(new_bbox);
+                        next_bboxes.push((new_bbox, extra));
                     }
                 }
                 current_bboxes = next_bboxes;
