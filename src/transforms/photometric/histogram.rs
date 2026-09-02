@@ -144,22 +144,38 @@ impl AutoContrast {
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 use std::arch::aarch64::*;
-                let mut min_v = vdupq_n_u8(255);
-                let mut max_v = vdupq_n_u8(0);
+                let mut min0 = vdupq_n_u8(255);
+                let mut min1 = vdupq_n_u8(255);
+                let mut min2 = vdupq_n_u8(255);
+                let mut min3 = vdupq_n_u8(255);
+                let mut max0 = vdupq_n_u8(0);
+                let mut max1 = vdupq_n_u8(0);
+                let mut max2 = vdupq_n_u8(0);
+                let mut max3 = vdupq_n_u8(0);
                 let chunks = image.data.len() / 64;
-                let ptr = image.data.as_ptr();
-                for i in 0..chunks {
-                    let v0 = vld1q_u8(ptr.add(i * 64));
-                    let v1 = vld1q_u8(ptr.add(i * 64 + 16));
-                    let v2 = vld1q_u8(ptr.add(i * 64 + 32));
-                    let v3 = vld1q_u8(ptr.add(i * 64 + 48));
-                    min_v = vminq_u8(min_v, vminq_u8(vminq_u8(v0, v1), vminq_u8(v2, v3)));
-                    max_v = vmaxq_u8(max_v, vmaxq_u8(vmaxq_u8(v0, v1), vmaxq_u8(v2, v3)));
+                let mut ptr = image.data.as_ptr();
+                for _ in 0..chunks {
+                    let v0 = vld1q_u8(ptr);
+                    let v1 = vld1q_u8(ptr.add(16));
+                    let v2 = vld1q_u8(ptr.add(32));
+                    let v3 = vld1q_u8(ptr.add(48));
+                    ptr = ptr.add(64);
+                    min0 = vminq_u8(min0, v0);
+                    min1 = vminq_u8(min1, v1);
+                    min2 = vminq_u8(min2, v2);
+                    min3 = vminq_u8(min3, v3);
+                    max0 = vmaxq_u8(max0, v0);
+                    max1 = vmaxq_u8(max1, v1);
+                    max2 = vmaxq_u8(max2, v2);
+                    max3 = vmaxq_u8(max3, v3);
                 }
+                let min_v = vminq_u8(vminq_u8(min0, min1), vminq_u8(min2, min3));
+                let max_v = vmaxq_u8(vmaxq_u8(max0, max1), vmaxq_u8(max2, max3));
                 let mut lo = vminvq_u8(min_v);
                 let mut hi = vmaxvq_u8(max_v);
+                let base = image.data.as_ptr();
                 for i in (chunks * 64)..image.data.len() {
-                    let val = *ptr.add(i);
+                    let val = *base.add(i);
                     lo = lo.min(val);
                     hi = hi.max(val);
                 }
@@ -172,12 +188,29 @@ impl AutoContrast {
                 (lo, hi)
             }
         } else {
-            // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
-            let mut hist = [0u32; 256];
-            let total = image.data.len() as u32;
-            for &pixel in image.data.iter() {
-                hist[pixel as usize] += 1;
+            // 256-bin histogram with 4 sub-tables to avoid store-load forwarding stalls
+            let mut h0 = [0u32; 256];
+            let mut h1 = [0u32; 256];
+            let mut h2 = [0u32; 256];
+            let mut h3 = [0u32; 256];
+            let chunks = image.data.len() / 4;
+            let ptr = image.data.as_ptr();
+            for i in 0..chunks {
+                unsafe {
+                    h0[*ptr.add(i * 4) as usize] += 1;
+                    h1[*ptr.add(i * 4 + 1) as usize] += 1;
+                    h2[*ptr.add(i * 4 + 2) as usize] += 1;
+                    h3[*ptr.add(i * 4 + 3) as usize] += 1;
+                }
             }
+            let mut hist = [0u32; 256];
+            for i in 0..256 {
+                hist[i] = h0[i] + h1[i] + h2[i] + h3[i];
+            }
+            for i in (chunks * 4)..image.data.len() {
+                hist[image.data[i] as usize] += 1;
+            }
+            let total = image.data.len() as u32;
 
             let trim = (total as f32 * self.cutoff).round() as u32;
             let mut lo = 0u8;
