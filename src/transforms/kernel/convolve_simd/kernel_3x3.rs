@@ -449,83 +449,103 @@ unsafe fn convolve_separable_gray_neon_3(image: &mut FusableImage) {
     let width = image.width;
     let height = image.height;
     let data = &mut image.data;
-    let total_bytes = data.len();
-    let mut temp = Vec::<u8>::with_capacity(total_bytes);
-    unsafe { temp.set_len(total_bytes); }
-    let radius = 1;
-    const TILE: usize = 16;
+    let row_bytes = width;
+    let mut h_buf = vec![0u8; 3 * row_bytes];
 
-    // HORIZONTAL PASS
-    for y in 0..height {
-        let row_offset = y * width;
-        let in_ptr = data.as_ptr().add(row_offset);
-        let out_ptr = temp.as_mut_ptr().add(row_offset);
+    unsafe fn horizontal_gray(data: &[u8], sy: usize, width: usize, h_buf: &mut [u8], slot: usize) {
+        let row_off = sy * width;
+        let dst = slot * width;
 
-        // Left edge (x = 0)
-        let left_val = *in_ptr as u32;
-        let mid_val = *in_ptr as u32;
-        let right_val = if width > 1 { *in_ptr.add(1) as u32 } else { left_val };
-        *out_ptr = ((left_val + mid_val * 2 + right_val) >> 2) as u8;
-
-        let simd_start = radius;
-        let simd_end = width.saturating_sub(radius);
-        let simd_chunks = if simd_end > simd_start { (simd_end - simd_start) / TILE } else { 0 };
-
-        let mut x = simd_start;
-        for _ in 0..simd_chunks {
-            let p0 = vld1q_u8(in_ptr.add(x - 1));
-            let p1 = vld1q_u8(in_ptr.add(x));
-            let p2 = vld1q_u8(in_ptr.add(x + 1));
-
-            let combined = blur3_gray_u8(p0, p1, p2);
-            vst1q_u8(out_ptr.add(x), combined);
-            x += TILE;
+        if width == 0 {
+            return;
         }
 
-        // Middle remainder
-        for rem_x in x..simd_end {
-            let p0 = *in_ptr.add(rem_x - 1) as u32;
-            let p1 = *in_ptr.add(rem_x) as u32;
-            let p2 = *in_ptr.add(rem_x + 1) as u32;
-            *out_ptr.add(rem_x) = ((p0 + p1 * 2 + p2) >> 2) as u8;
+        let left_val = data[row_off] as u32;
+        let right_val = if width > 1 { data[row_off + 1] as u32 } else { left_val };
+        h_buf[dst] = ((left_val + left_val * 2 + right_val) >> 2) as u8;
+
+        let chunks = if width > 2 { (width - 2) / 16 } else { 0 };
+        let in_ptr = data.as_ptr().add(row_off);
+        let out_ptr = h_buf.as_mut_ptr().add(dst);
+
+        for k in 0..chunks {
+            let bx = 1 + k * 16;
+            let p0 = vld1q_u8(in_ptr.add(bx - 1));
+            let p1 = vld1q_u8(in_ptr.add(bx));
+            let p2 = vld1q_u8(in_ptr.add(bx + 1));
+            let r = blur3_gray_u8(p0, p1, p2);
+            vst1q_u8(out_ptr.add(bx), r);
         }
 
-        // Right edge
+        for x in (1 + chunks * 16)..width.saturating_sub(1) {
+            let p0 = *in_ptr.add(x - 1) as u32;
+            let p1 = *in_ptr.add(x) as u32;
+            let p2 = *in_ptr.add(x + 1) as u32;
+            *out_ptr.add(x) = ((p0 + p1 * 2 + p2) >> 2) as u8;
+        }
+
         if width > 1 {
             let rx = width - 1;
             let p0 = *in_ptr.add(rx - 1) as u32;
             let p1 = *in_ptr.add(rx) as u32;
-            let p2 = *in_ptr.add(rx) as u32;
-            *out_ptr.add(rx) = ((p0 + p1 * 2 + p2) >> 2) as u8;
+            *out_ptr.add(rx) = ((p0 + p1 * 2 + p1) >> 2) as u8;
         }
     }
 
-    // VERTICAL PASS
-    let row_chunks = width / 16;
-    for y in 0..height {
-        let prev_y = y.saturating_sub(1);
-        let next_y = (y + 1).min(height - 1);
+    unsafe fn vertical_gray(
+        h_buf: &[u8],
+        s0: usize,
+        s1: usize,
+        s2: usize,
+        width: usize,
+        data: &mut [u8],
+        oy: usize,
+    ) {
+        let b0 = s0 * width;
+        let b1 = s1 * width;
+        let b2 = s2 * width;
+        let out_row = oy * width;
 
-        let prev_ptr = temp.as_ptr().add(prev_y * width);
-        let curr_ptr = temp.as_ptr().add(y * width);
-        let next_ptr = temp.as_ptr().add(next_y * width);
-        let out_ptr = data.as_mut_ptr().add(y * width);
+        let chunks = width / 16;
+        let p0_base = h_buf.as_ptr().add(b0);
+        let p1_base = h_buf.as_ptr().add(b1);
+        let p2_base = h_buf.as_ptr().add(b2);
+        let out_base = data.as_mut_ptr().add(out_row);
 
-        for chunk in 0..row_chunks {
-            let offset = chunk * 16;
-            let r_prev = vld1q_u8(prev_ptr.add(offset));
-            let r_curr = vld1q_u8(curr_ptr.add(offset));
-            let r_next = vld1q_u8(next_ptr.add(offset));
-
-            let res = blur3_gray_u8(r_prev, r_curr, r_next);
-            vst1q_u8(out_ptr.add(offset), res);
+        for k in 0..chunks {
+            let bx = k * 16;
+            let v0 = vld1q_u8(p0_base.add(bx));
+            let v1 = vld1q_u8(p1_base.add(bx));
+            let v2 = vld1q_u8(p2_base.add(bx));
+            let r = blur3_gray_u8(v0, v1, v2);
+            vst1q_u8(out_base.add(bx), r);
         }
 
-        for x in (row_chunks * 16)..width {
-            let p0 = *prev_ptr.add(x) as u32;
-            let p1 = *curr_ptr.add(x) as u32;
-            let p2 = *next_ptr.add(x) as u32;
-            *out_ptr.add(x) = ((p0 + p1 * 2 + p2) >> 2) as u8;
+        for x in (chunks * 16)..width {
+            let v0 = *p0_base.add(x) as u32;
+            let v1 = *p1_base.add(x) as u32;
+            let v2 = *p2_base.add(x) as u32;
+            *out_base.add(x) = ((v0 + v1 * 2 + v2) >> 2) as u8;
+        }
+    }
+
+    for y in 0..=height {
+        let sy = y.min(height - 1);
+        let slot = y % 3;
+        horizontal_gray(data, sy, width, &mut h_buf, slot);
+        if y == 1 {
+            vertical_gray(&h_buf, 0, 0, 1, width, data, 0);
+        }
+        if y >= 2 {
+            vertical_gray(
+                &h_buf,
+                (y - 2) % 3,
+                (y - 1) % 3,
+                y % 3,
+                width,
+                data,
+                y - 1,
+            );
         }
     }
 }
