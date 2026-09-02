@@ -521,12 +521,55 @@ unsafe fn resize_bilinear_down2_gray_neon(
         let mut x_new = 0;
         let mut in_x = 0;
 
-        while x_new + 16 <= dst_width && in_x + 32 <= src_stride {
-            let r0_pair = vld2q_u8(row0.add(in_x));
-            let r1_pair = vld2q_u8(row1.add(in_x));
+        while x_new + 32 <= dst_width && in_x + 64 <= src_stride {
+            let r0_0 = vld1q_u8(row0.add(in_x));
+            let r0_1 = vld1q_u8(row0.add(in_x + 16));
+            let r0_2 = vld1q_u8(row0.add(in_x + 32));
+            let r0_3 = vld1q_u8(row0.add(in_x + 48));
 
-            let top = vrhaddq_u8(r0_pair.0, r0_pair.1);
-            let bot = vrhaddq_u8(r1_pair.0, r1_pair.1);
+            let r1_0 = vld1q_u8(row1.add(in_x));
+            let r1_1 = vld1q_u8(row1.add(in_x + 16));
+            let r1_2 = vld1q_u8(row1.add(in_x + 32));
+            let r1_3 = vld1q_u8(row1.add(in_x + 48));
+
+            let r0_even0 = vuzp1q_u8(r0_0, r0_1);
+            let r0_odd0 = vuzp2q_u8(r0_0, r0_1);
+            let r0_even1 = vuzp1q_u8(r0_2, r0_3);
+            let r0_odd1 = vuzp2q_u8(r0_2, r0_3);
+
+            let r1_even0 = vuzp1q_u8(r1_0, r1_1);
+            let r1_odd0 = vuzp2q_u8(r1_0, r1_1);
+            let r1_even1 = vuzp1q_u8(r1_2, r1_3);
+            let r1_odd1 = vuzp2q_u8(r1_2, r1_3);
+
+            let top0 = vrhaddq_u8(r0_even0, r0_odd0);
+            let top1 = vrhaddq_u8(r0_even1, r0_odd1);
+            let bot0 = vrhaddq_u8(r1_even0, r1_odd0);
+            let bot1 = vrhaddq_u8(r1_even1, r1_odd1);
+
+            let res0 = vrhaddq_u8(top0, bot0);
+            let res1 = vrhaddq_u8(top1, bot1);
+
+            vst1q_u8(dst_row.add(x_new), res0);
+            vst1q_u8(dst_row.add(x_new + 16), res1);
+
+            x_new += 32;
+            in_x += 64;
+        }
+
+        while x_new + 16 <= dst_width && in_x + 32 <= src_stride {
+            let r0_0 = vld1q_u8(row0.add(in_x));
+            let r0_1 = vld1q_u8(row0.add(in_x + 16));
+            let r1_0 = vld1q_u8(row1.add(in_x));
+            let r1_1 = vld1q_u8(row1.add(in_x + 16));
+
+            let r0_even = vuzp1q_u8(r0_0, r0_1);
+            let r0_odd = vuzp2q_u8(r0_0, r0_1);
+            let r1_even = vuzp1q_u8(r1_0, r1_1);
+            let r1_odd = vuzp2q_u8(r1_0, r1_1);
+
+            let top = vrhaddq_u8(r0_even, r0_odd);
+            let bot = vrhaddq_u8(r1_even, r1_odd);
             let res = vrhaddq_u8(top, bot);
 
             vst1q_u8(dst_row.add(x_new), res);

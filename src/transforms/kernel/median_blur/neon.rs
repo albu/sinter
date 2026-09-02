@@ -55,9 +55,31 @@ unsafe fn median_of_3_sorted_columns(
     mid3(max_min, mid_mid, min_max)
 }
 
-/// Sort the 16 vertical 3-tuples (prev/curr/next rows) starting at byte
-/// `off`. One call produces the sorted columns for 16 consecutive window
-/// positions.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn vmedian9_sortnet(
+    mut p0: uint8x16_t, mut p1: uint8x16_t, mut p2: uint8x16_t,
+    mut p3: uint8x16_t, mut p4: uint8x16_t, mut p5: uint8x16_t,
+    mut p6: uint8x16_t, mut p7: uint8x16_t, mut p8: uint8x16_t,
+) -> uint8x16_t {
+    macro_rules! vcas {
+        ($a:expr, $b:expr) => {
+            let min = vminq_u8($a, $b);
+            let max = vmaxq_u8($a, $b);
+            $a = min;
+            $b = max;
+        };
+    }
+    vcas!(p1, p2); vcas!(p4, p5); vcas!(p7, p8);
+    vcas!(p0, p1); vcas!(p3, p4); vcas!(p6, p7);
+    vcas!(p1, p2); vcas!(p4, p5); vcas!(p7, p8);
+    vcas!(p0, p3); vcas!(p5, p8); vcas!(p4, p7);
+    vcas!(p3, p6); vcas!(p1, p4); vcas!(p2, p5);
+    vcas!(p4, p7); vcas!(p4, p2); vcas!(p6, p4);
+    vcas!(p4, p2);
+    p4
+}
+
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn sorted_column_group(
@@ -71,26 +93,6 @@ unsafe fn sorted_column_group(
         vld1q_u8(curr_ptr.add(off)),
         vld1q_u8(next_ptr.add(off)),
     )
-}
-
-/// Sorted-column group for interleaved RGB: `vld3q_u8` deinterleaves 16
-/// pixels per row load, so pixel offset `px` yields all three channels'
-/// columns for 16 consecutive pixels.
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn sorted_column_group_rgb3(
-    prev_ptr: *const u8,
-    curr_ptr: *const u8,
-    next_ptr: *const u8,
-    px: usize,
-) -> [[uint8x16_t; 3]; 3] {
-    let pv = vld3q_u8(prev_ptr.add(px * 3));
-    let cv = vld3q_u8(curr_ptr.add(px * 3));
-    let nv = vld3q_u8(next_ptr.add(px * 3));
-    let c0 = sort3(pv.0, cv.0, nv.0);
-    let c1 = sort3(pv.1, cv.1, nv.1);
-    let c2 = sort3(pv.2, cv.2, nv.2);
-    [[c0.0, c0.1, c0.2], [c1.0, c1.1, c1.2], [c2.0, c2.1, c2.2]]
 }
 
 /// Apply 3x3 median filter using ARM NEON column-cache sorting network
@@ -197,66 +199,59 @@ pub unsafe fn apply_median_blur_3x3_neon(
             }
         }
 
-        if step == 3 && width >= 48 {
-            // RGB sliding-column path: same scheme as the gray path, but in
-            // pixel space — `vld3q_u8` deinterleaves each row load, so the
-            // per-channel columns of a block are adjacent across blocks and
-            // slide via vext. One new group (3 vld3q + 3 sort3) per 16
-            // pixels; a single vst3q_u8 reinterleaves the result.
-            let mut g0 = sorted_column_group_rgb3(prev_ptr, curr_ptr, next_ptr, 0);
-            let mut g1 = sorted_column_group_rgb3(prev_ptr, curr_ptr, next_ptr, 16);
-            let mut p = 1usize;
-            while p + 47 <= width {
-                let mut res = [vdupq_n_u8(0); 3];
-                for c in 0..3 {
-                    let c1 = [
-                        vextq_u8(g0[c][0], g1[c][0], 1),
-                        vextq_u8(g0[c][1], g1[c][1], 1),
-                        vextq_u8(g0[c][2], g1[c][2], 1),
-                    ];
-                    let c2 = [
-                        vextq_u8(g0[c][0], g1[c][0], 2),
-                        vextq_u8(g0[c][1], g1[c][1], 2),
-                        vextq_u8(g0[c][2], g1[c][2], 2),
-                    ];
-                    res[c] = median_of_3_sorted_columns(
-                        g0[c][0], g0[c][1], g0[c][2],
-                        c1[0], c1[1], c1[2],
-                        c2[0], c2[1], c2[2],
-                    );
-                }
-                vst3q_u8(
-                    out_ptr.add(p * 3),
-                    uint8x16x3_t(res[0], res[1], res[2]),
-                );
-                g0 = g1;
-                g1 = sorted_column_group_rgb3(prev_ptr, curr_ptr, next_ptr, p + 31);
-                p += 16;
-            }
-            byte_idx = p * step;
+        while byte_idx + 32 <= simd_end + 16 {
+            let p00_a = vld1q_u8(prev_ptr.add(byte_idx - step));
+            let p01_a = vld1q_u8(prev_ptr.add(byte_idx));
+            let p02_a = vld1q_u8(prev_ptr.add(byte_idx + step));
+            let p10_a = vld1q_u8(curr_ptr.add(byte_idx - step));
+            let p11_a = vld1q_u8(curr_ptr.add(byte_idx));
+            let p12_a = vld1q_u8(curr_ptr.add(byte_idx + step));
+            let p20_a = vld1q_u8(next_ptr.add(byte_idx - step));
+            let p21_a = vld1q_u8(next_ptr.add(byte_idx));
+            let p22_a = vld1q_u8(next_ptr.add(byte_idx + step));
+
+            let p00_b = vld1q_u8(prev_ptr.add(byte_idx + 16 - step));
+            let p01_b = vld1q_u8(prev_ptr.add(byte_idx + 16));
+            let p02_b = vld1q_u8(prev_ptr.add(byte_idx + 16 + step));
+            let p10_b = vld1q_u8(curr_ptr.add(byte_idx + 16 - step));
+            let p11_b = vld1q_u8(curr_ptr.add(byte_idx + 16));
+            let p12_b = vld1q_u8(curr_ptr.add(byte_idx + 16 + step));
+            let p20_b = vld1q_u8(next_ptr.add(byte_idx + 16 - step));
+            let p21_b = vld1q_u8(next_ptr.add(byte_idx + 16));
+            let p22_b = vld1q_u8(next_ptr.add(byte_idx + 16 + step));
+
+            let res_a = vmedian9_sortnet(
+                p00_a, p01_a, p02_a,
+                p10_a, p11_a, p12_a,
+                p20_a, p21_a, p22_a,
+            );
+            let res_b = vmedian9_sortnet(
+                p00_b, p01_b, p02_b,
+                p10_b, p11_b, p12_b,
+                p20_b, p21_b, p22_b,
+            );
+
+            vst1q_u8(out_ptr.add(byte_idx), res_a);
+            vst1q_u8(out_ptr.add(byte_idx + 16), res_b);
+
+            byte_idx += 32;
         }
 
         while byte_idx <= simd_end {
             let p00 = vld1q_u8(prev_ptr.add(byte_idx - step));
             let p01 = vld1q_u8(prev_ptr.add(byte_idx));
             let p02 = vld1q_u8(prev_ptr.add(byte_idx + step));
-
             let p10 = vld1q_u8(curr_ptr.add(byte_idx - step));
             let p11 = vld1q_u8(curr_ptr.add(byte_idx));
             let p12 = vld1q_u8(curr_ptr.add(byte_idx + step));
-
             let p20 = vld1q_u8(next_ptr.add(byte_idx - step));
             let p21 = vld1q_u8(next_ptr.add(byte_idx));
             let p22 = vld1q_u8(next_ptr.add(byte_idx + step));
 
-            let (c0_min, c0_mid, c0_max) = sort3(p00, p10, p20);
-            let (c1_min, c1_mid, c1_max) = sort3(p01, p11, p21);
-            let (c2_min, c2_mid, c2_max) = sort3(p02, p12, p22);
-
-            let res = median_of_3_sorted_columns(
-                c0_min, c0_mid, c0_max,
-                c1_min, c1_mid, c1_max,
-                c2_min, c2_mid, c2_max,
+            let res = vmedian9_sortnet(
+                p00, p01, p02,
+                p10, p11, p12,
+                p20, p21, p22,
             );
             vst1q_u8(out_ptr.add(byte_idx), res);
             byte_idx += 16;
