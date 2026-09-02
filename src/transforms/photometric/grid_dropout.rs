@@ -136,10 +136,7 @@ impl GridDropout {
             for row in y_start..y_end {
                 let row_start = row * row_stride + x_start * channels;
                 let row_end = row * row_stride + x_end * channels;
-
-                for px in row_start..row_end {
-                    image.data[px] = self.fill_value;
-                }
+                image.data[row_start..row_end].fill(self.fill_value);
             }
         }
     }

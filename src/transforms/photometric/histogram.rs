@@ -140,30 +140,61 @@ impl AutoContrast {
     ///
     /// Uses fixed-point arithmetic to avoid float operations.
     fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
-        // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
-        let mut hist = [0u32; 256];
-        let total = image.data.len() as u32;
-        for &pixel in image.data.iter() {
-            hist[pixel as usize] += 1;
-        }
+        let (lo, hi) = if self.cutoff == 0.0 {
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let mut min_v = vdupq_n_u8(255);
+                let mut max_v = vdupq_n_u8(0);
+                let chunks = image.data.len() / 64;
+                let ptr = image.data.as_ptr();
+                for i in 0..chunks {
+                    let v0 = vld1q_u8(ptr.add(i * 64));
+                    let v1 = vld1q_u8(ptr.add(i * 64 + 16));
+                    let v2 = vld1q_u8(ptr.add(i * 64 + 32));
+                    let v3 = vld1q_u8(ptr.add(i * 64 + 48));
+                    min_v = vminq_u8(min_v, vminq_u8(vminq_u8(v0, v1), vminq_u8(v2, v3)));
+                    max_v = vmaxq_u8(max_v, vmaxq_u8(vmaxq_u8(v0, v1), vmaxq_u8(v2, v3)));
+                }
+                let mut lo = vminvq_u8(min_v);
+                let mut hi = vmaxvq_u8(max_v);
+                for i in (chunks * 64)..image.data.len() {
+                    let val = *ptr.add(i);
+                    lo = lo.min(val);
+                    hi = hi.max(val);
+                }
+                (lo, hi)
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let lo = *image.data.iter().min().unwrap_or(&0);
+                let hi = *image.data.iter().max().unwrap_or(&255);
+                (lo, hi)
+            }
+        } else {
+            // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
+            let mut hist = [0u32; 256];
+            let total = image.data.len() as u32;
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
 
-        // Trim `cutoff * total` pixels from each end (albumentations semantics:
-        // cutoff is the fraction of pixels ignored at the low and high ends).
-        let trim = (total as f32 * self.cutoff).round() as u32;
+            let trim = (total as f32 * self.cutoff).round() as u32;
+            let mut lo = 0u8;
+            let mut remaining = trim;
+            while lo < 255 && remaining >= hist[lo as usize] {
+                remaining -= hist[lo as usize];
+                lo += 1;
+            }
 
-        let mut lo = 0u8;
-        let mut remaining = trim;
-        while lo < 255 && remaining >= hist[lo as usize] {
-            remaining -= hist[lo as usize];
-            lo += 1;
-        }
-
-        let mut hi = 255u8;
-        let mut remaining = trim;
-        while hi > 0 && remaining >= hist[hi as usize] {
-            remaining -= hist[hi as usize];
-            hi -= 1;
-        }
+            let mut hi = 255u8;
+            let mut remaining = trim;
+            while hi > 0 && remaining >= hist[hi as usize] {
+                remaining -= hist[hi as usize];
+                hi -= 1;
+            }
+            (lo, hi)
+        };
 
         // Uniform (or fully trimmed) image: preserve the historical edge case.
         if lo >= hi {
