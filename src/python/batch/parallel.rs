@@ -82,7 +82,31 @@ where
             return Ok(arr4.as_ref());
         }
 
-        let working_array = if is_inplace {
+        let is_c_contiguous = images
+            .getattr("flags")
+            .and_then(|f| f.getattr("c_contiguous"))
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(true);
+
+        if is_inplace {
+            if !is_c_contiguous {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate non-contiguous batch with inplace=True; use inplace=False to allow defensive copy",
+                ));
+            }
+            let is_writeable = images
+                .getattr("flags")
+                .and_then(|f| f.getattr("writeable"))
+                .and_then(|w| w.extract::<bool>())
+                .unwrap_or(true);
+            if !is_writeable {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate read-only batch with inplace=True; use inplace=False to create a defensive copy",
+                ));
+            }
+        }
+
+        let working_array = if is_inplace && is_c_contiguous {
             arr4
         } else {
             let copied = images.call_method0("copy")?;

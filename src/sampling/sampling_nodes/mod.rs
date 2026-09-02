@@ -217,14 +217,18 @@ pub enum RandomImageNode {
     // =========================================================================
     // Structural Nodes (Pure composition, NO activation)
     // =========================================================================
+    /// Identity: no-op, emits no ops
+    Identity,
+
     /// Apply all children in sequence
     All {
         children: Vec<RandomImageNode>,
     },
 
-    /// Apply exactly one child (chosen uniformly at random)
+    /// Apply exactly one child (chosen uniformly or by weights)
     OneOf {
         children: Vec<RandomImageNode>,
+        weights: Option<Vec<f32>>,
     },
 
     /// Apply k children where k is sampled from distribution n
@@ -604,9 +608,15 @@ impl RandomImageNode {
                 }
             }
 
-            RandomImageNode::OneOf { children } => {
+            RandomImageNode::Identity => {}
+
+            RandomImageNode::OneOf { children, weights } => {
                 assert!(!children.is_empty(), "OneOf requires at least one child");
-                let idx = sample_index(ctx.rng, children.len());
+                let idx = if let Some(w) = weights {
+                    sample_weighted_index(ctx.rng, w)
+                } else {
+                    sample_index(ctx.rng, children.len())
+                };
                 children[idx].sample(ctx, out);
             }
 
@@ -691,9 +701,12 @@ impl RandomImageNode {
             | RandomImageNode::Emboss { .. }
             | RandomImageNode::EdgeDetection { .. } => AccessPattern::OutOfPlace,
 
+            // Identity
+            RandomImageNode::Identity => AccessPattern::InPlace,
+
             // Structural: delegate to first child
             RandomImageNode::All { children }
-            | RandomImageNode::OneOf { children }
+            | RandomImageNode::OneOf { children, .. }
             | RandomImageNode::SomeOf { children, .. } => children
                 .first()
                 .map(|c| c.access())
@@ -707,6 +720,9 @@ impl RandomImageNode {
     /// Get the shape effect for this node
     pub fn shape_effect(&self) -> ShapeEffect {
         match self {
+            // Identity
+            RandomImageNode::Identity => ShapeEffect::Preserve,
+
             // Geometric: Preserve
             RandomImageNode::HorizontalFlip
             | RandomImageNode::VerticalFlip
@@ -753,7 +769,7 @@ impl RandomImageNode {
 
             // Structural: delegate to first child
             RandomImageNode::All { children }
-            | RandomImageNode::OneOf { children }
+            | RandomImageNode::OneOf { children, .. }
             | RandomImageNode::SomeOf { children, .. } => children
                 .first()
                 .map(|c| c.shape_effect())
@@ -768,6 +784,23 @@ impl RandomImageNode {
 // =============================================================================
 // Helper functions for sampling
 // =============================================================================
+
+/// Sample a single index according to positive weights
+fn sample_weighted_index(rng: &mut dyn Rng, weights: &[f32]) -> usize {
+    let total: f32 = weights.iter().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let roll = Uniform::new(0.0, total).sample(rng);
+    let mut acc = 0.0;
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if roll <= acc {
+            return i;
+        }
+    }
+    weights.len().saturating_sub(1)
+}
 
 /// Sample a single index in [0, upper)
 fn sample_index(rng: &mut dyn Rng, upper: usize) -> usize {

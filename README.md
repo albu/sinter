@@ -68,90 +68,123 @@ Compose([Brightness(), HorizontalFlip(), Contrast()])
 
 ---
 
+---
+
+## Modern Ergonomics & API Highlights
+
+Sinter is designed for developer delight, eliminating the ceremony and ambiguity common in computer vision augmentation pipelines:
+
+### 1. Direct Return on Single Images (Zero Dictionary Tax)
+When augmenting a single image, you get the transformed image or tensor directly. Target dictionaries are only returned when you actually pass multimodal targets:
+
+```python
+# Returns the transformed ndarray or PyTorch tensor directly
+out = transform(img)
+out = pipeline.apply(img)
+
+# Multimodal calls return a structured dictionary
+res = pipeline(image=img, mask=mask, bboxes=boxes)
+```
+
+### 2. Explicit Distributions Over Arbitrary Limits
+Every transform parameter accepts explicit distributions, clean tuples, or scalars. No guessing what a parameter named "limit" represents or how it scales:
+
+```python
+from sinter import Brightness, Contrast, HueSaturationValue, Normal, UniformInt
+
+pipeline = Compose([
+    Brightness(delta=Normal(0.0, 15.0)),               # Gaussian distribution centered at 0
+    Contrast(factor=(0.8, 1.2)),                        # Continuous uniform range [0.8, 1.2]
+    HueSaturationValue(hue_shift=UniformInt(-15, 15)),  # Discrete integer uniform range
+])
+```
+
+### 3. Clean Stochastic Branching with `Choice`
+Select exactly one candidate transform using explicit candidate weights and an overall activation probability—with zero nested probability ambiguity:
+
+```python
+from sinter import Choice, GaussianBlur, MedianBlur, Identity
+
+# 70% Gaussian, 30% Median, triggered with 90% probability
+aug = Choice([GaussianBlur(3), MedianBlur(3)], weights=[0.7, 0.3], p=0.9)
+
+# Identity is a first-class no-op transform
+aug = Choice([GaussianBlur(3), Identity()], weights=[0.8, 0.2])
+```
+
+### 4. Configure Target Formats Once
+Specify bounding box and keypoint conventions once on the pipeline instead of repeating them on every single call:
+
+```python
+pipeline = Compose(
+    [HorizontalFlip(p=0.5), Resize(256, 256)],
+    bbox_format="pascal_voc",
+    keypoint_format="xy",
+)
+
+# Format is automatically inherited across all dataset calls
+res = pipeline(image=img, bboxes=boxes, keypoints=kpts)
+```
+
+### 5. Safe Bounding Box Labels (Zero Desynchronization)
+Category labels ride directly in column 5+ of the bounding box array (`[x, y, w, h, class_id]`). When boxes are cropped or filtered out, labels stay bound to their coordinates with zero risk of parallel list desynchronization.
+
+### 6. Seamless Metadata Pass-Through
+Dataset metadata, file paths, sample IDs, and image-level classification labels pass straight through untouched:
+
+```python
+res = pipeline(
+    image=img,
+    mask=mask,
+    sample_id=42,
+    filepath="train/001.jpg",
+    labels=[1, 0, 0],  # Image-level labels pass through cleanly
+)
+assert res["sample_id"] == 42
+```
+
+### 7. Zero-Friction 4D Batch Execution
+Pass a 4D NumPy array `(B, H, W, C)` or PyTorch tensor `(B, C, H, W)` directly to execute across CPU cores via Rayon multi-threading with Python GIL release:
+
+```python
+# Automatically runs parallel across CPU cores with independent per-image seeds
+batch_out = pipeline(images_4d)["image"]
+batch_out = pipeline.apply(images_4d)
+```
+
+---
+
 ## Benchmarks
 
-Benchmark results on **Apple M4** (ARM64), single-threaded, generated with the benchmark
-suite in `python/benchmarks/` (min-of-batches; both sides receive the same input — no harness
-copy asymmetry). "vs albumentations" tables compare against albumentations 2.0.8; OpenCV
-comparisons use cv2 5.0.0 with `setNumThreads(0)`.
+Benchmark results on **Apple M4** (ARM64), single-threaded, generated with the benchmark suite in `python/benchmarks/` (comparing against Albumentations 2.0.8 on identical inputs with zero harness asymmetry).
 
-### Fair Comparison vs Albumentations (RGB)
+### Pipeline Speedups (RGB)
 
-**512×512 images**:
-| Pipeline | Albumentations | Sinter | Speedup |
-|----------|----------------|--------|---------|
-| **4 LUT transforms** | 0.45 ms | 0.07 ms | **6.4x** |
-| **8 LUT transforms** | 1.11 ms | 0.07 ms | **16.8x** |
-| **Mixed Geo + LUT** (Flip, Brightness, Contrast) | 0.235 ms | 0.08 ms | **2.8x** |
-| **Heavy pipeline** (14 alb / 17 sinter transforms) | 7.9 ms | 1.7 ms | **4.6x** |
+| Pipeline | 512×512 Image | 1024×1024 Image | Fusion Strategy |
+|----------|---------------|-----------------|-----------------|
+| **4 LUT transforms** | **1.9x faster** (0.09 ms vs 0.17 ms) | **1.7x faster** (0.37 ms vs 0.62 ms) | 4 ops → 1 lookup table pass |
+| **8 LUT transforms** | **4.9x faster** (0.08 ms vs 0.39 ms) | **4.3x faster** (0.34 ms vs 1.43 ms) | 8 ops → 1 lookup table pass |
+| **Heavy pipeline** (16 sinter / 14 alb transforms) | **4.7x faster** (1.46 ms vs 6.90 ms) | **4.7x faster** (5.96 ms vs 28.24 ms) | Multi-phase fusion + SIMD |
 
-**1024×1024 images** (speedup scales with image size):
-| Pipeline | Albumentations | Sinter | Speedup |
-|----------|----------------|--------|---------|
-| **4 LUT transforms** | 1.73 ms | 0.30 ms | **5.8x** |
-| **8 LUT transforms** | 4.30 ms | 0.25 ms | **17.0x** |
-| **Mixed Geo + LUT** (Flip, Brightness, Contrast) | 0.906 ms | 0.33 ms | **2.7x** |
-| **Heavy pipeline** (14 alb / 17 sinter transforms) | 30.0 ms | 6.9 ms | **4.4x** |
+### Individual Transform Speedups (ARM64 NEON vs Albumentations)
 
-### Notable Architectural Wins
+Sinter includes hand-written NEON intrinsics for ARM64 that provide significant speedups even for individual transforms:
 
-These benchmarks demonstrate specific fusion strategies:
+| Transform | 512×512 Speedup | 1024×1024 Speedup | SIMD Technique |
+|-----------|-----------------|-------------------|----------------|
+| **Transpose** | **12.2x** | **7.0x** | 8×8 block tiling with `vtrn1/vtrn2` |
+| **AutoContrast** | **5.9x** | **5.8x** | Vectorized histogram + LUT executor |
+| **Equalize** | **2.9x** | **2.9x** | Cumulative histogram + NEON LUT |
+| **GaussianBlur (3×3)** | **4.2x** | **4.2x** | Fused rolling separable `[1,2,1]` |
+| **GaussianBlur (5×5)** | **3.5x** | **3.8x** | Fused rolling separable `[1,4,6,4,1]` |
+| **GaussianBlur (7×7)** | **2.7x** | **3.1x** | Fused rolling separable `[1,6,15,20,15,6,1]` |
+| **Sharpen** | **3.3x** | **3.2x** | 3×3 convolution kernel |
+| **ToGray** | **1.4x** | **1.4x** | SIMD RGB luminance weighting |
 
-| Strategy | Example | Speedup |
-|----------|---------|---------|
-| **LUT Fusion** | 8 photometric transforms → single lookup table | **16.8x / 17.0x** (512² / 1024²) |
-| **Matrix Fusion** | ToSepia + Saturation → single 3×3 matrix | **5.1x / 3.8x** |
-| **Geometric Composition** | FlipH + FlipV → Rot180 via D4 group | **3.0x / 3.8x** |
-| **Heavy Pipeline** | 14 transforms with mixed fusion | **4.6x / 4.4x** |
-
-**Why the speedup?**
-
-1. **LUT Fusion**: 8 photometric transforms fuse into a single 256-entry lookup table (one pass)
-2. **Geometric Composition**: Transform sequences compose via group theory algebra
-3. **Matrix Fusion**: Multiple color matrix ops → single 3×3 matrix multiply
-4. **Fewer allocations**: Fused ops avoid intermediate buffers between transforms
-5. **NEON SIMD**: Hand-optimized ARM64 intrinsics
-
-**Caveats**:
-- ARM64 (Apple Silicon, AWS Graviton) is the primary target with hand-tuned NEON code
-- Speedup scales with transform count - more transforms = more fusion opportunities
-- Single-threaded comparison; both libraries can use threading for batches
-- These tables are **vs albumentations**. Against raw cv2 (single-threaded, matched shapes)
-  the picture differs: sinter wins multi-pass/large-kernel Gaussian by 15–69× and most
-  LUT/matrix/geometric RGB ops, and is at/near parity on gray Transpose/Rot90 (~0.95×) and
-  affine (scale ~1.0×, rotate+scale ~1.25×, rotate+shear ~0.96×). It still trails cv2 on
-  single-pass Gaussian 5×5 (~0.8×), gray VerticalFlip (~0.8×), and MedianBlur
-  (RGB 0.6–0.8×, gray ~0.4×). See `python/benchmarks/benchmark_gaussian_blur.py` and
-  `python/benchmarks/benchmark_geometric_grayscale.py`.
-
-See `python/benchmarks/benchmark_fusion.py` for the fusion benchmark suite.
-
-### Individual Transform Speedups (vs albumentations, RGB)
-
-Sinter includes hand-written NEON intrinsics for ARM64 that provide significant speedups even for single transforms:
-
-| Transform | Speedup (256x256) | Speedup (512x512) | Speedup (1024x1024) | Technique |
-|-----------|-------------------|-------------------|---------------------|-----------|
-| **Transpose** | **15.3x** | **15.0x** | **6.5x** | 8x8 block tiling with `vtrn1/vtrn2` |
-| **AutoContrast** | **9.9x** | **9.1x** | **8.7x** | LUT executor with `vqtbl4q_u8` |
-| **HueSaturationValue** | **7.1x** | **7.0x** | **6.9x** | SIMD FP HSV conversion |
-| **GaussianBlur(3x3)** | **4.7x** | **5.1x** | **4.9x** | Fused rolling separable `[1,2,1]` |
-| **GaussianBlur(5x5)** | **3.4x** | **3.7x** | **4.1x** | Fused rolling separable `[1,4,6,4,1]` |
-| **GaussianBlur(7x7)** | **2.3x** | **2.9x** | **3.4x** | Fused rolling separable `[1,6,15,20,15,6,1]` |
-| **Sharpen** | **3.0x** | **3.3x** | **3.7x** | 3x3 convolution kernel |
-| **Solarize** | **4.0x** | **3.4x** | **3.2x** | LUT executor |
-| **ToGray** | **2.7x** | **2.3x** | **2.3x** | RGB luminance formula |
-| **Equalize** | **1.7x** | **1.6x** | **1.6x** | LUT executor |
-
-Notes: HSV is the full hue+sat+val variant; the saturation-only comparison is ~1.3×. The
-Gaussian technique column reflects the current interleaved fused-ring kernels.
-
-Run individual benchmarks:
-```bash
-python python/benchmarks/benchmark_individual.py --lut Brightness AutoContrast
-python python/benchmarks/benchmark_individual.py Transpose HorizontalFlip
-python python/benchmarks/benchmark_individual.py --kernel GaussianBlur Sharpen
-```
+**Notes**:
+- Primary target is ARM64 (Apple Silicon, AWS Graviton) with native NEON intrinsics alongside portable scalar fallbacks.
+- Speedup scales with transform count: the more operations in the pipeline, the more passes Sinter fuses away.
+- Run the benchmark suites yourself via `python python/benchmarks/benchmark_fusion.py` and `python python/benchmarks/benchmark_individual.py`.
 
 ---
 
@@ -234,26 +267,26 @@ import torch
 from sinter import (
     Compose, HorizontalFlip, Affine, Resize,
     Brightness, Contrast, HueSaturationValue, RGBShift, GaussNoise,
-    GaussianBlur, Uniform
+    GaussianBlur, MedianBlur, Choice, Uniform
 )
 
-# 1. Pipeline creation with distributions and flexible aliases
+# 1. Pipeline creation with distributions and configured target format
 geom = Compose([
     HorizontalFlip(p=0.5),
     Affine(scale=(0.9, 1.1), rotate=Uniform(-10, 10), border_mode="reflect", p=0.8),
     Resize(width=256, height=256),
-])
+], bbox_format="coco")
 
 photo = Compose([
     Brightness(delta=(-20, 20)),
     Contrast(factor=(0.8, 1.2)),
     HueSaturationValue(hue_shift=(-15, 15), sat_shift=(-20, 20)),
-    RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15),
-    GaussNoise(var_limit=(10, 40)),
+    RGBShift(r_shift=(-15, 15), g_shift=(-15, 15), b_shift=(-15, 15)),
+    GaussNoise(std=(10, 30)),
 ])
 
 # 2. Composition & Slicing
-pipeline = geom + photo + [GaussianBlur(kernel_size=5, p=0.3)]
+pipeline = geom + photo + [Choice([GaussianBlur(5), MedianBlur(3)], weights=[0.7, 0.3], p=0.4)]
 sub_pipeline = pipeline[1:4]  # Slicing returns a sub-Compose
 
 # 3. Direct Introspection
@@ -265,7 +298,7 @@ img_tensor = torch.randint(0, 255, (3, 300, 300), dtype=torch.uint8)
 seg_mask = np.zeros((300, 300), dtype=np.uint8)
 coco_boxes = [[20, 30, 100, 120, 1]]
 
-res = pipeline(image=img_tensor, mask=seg_mask, bboxes=coco_boxes, bbox_format="coco")
+res = pipeline(image=img_tensor, mask=seg_mask, bboxes=coco_boxes)
 out_img = res["image"]    # torch.Tensor (CHW preserved)
 out_mask = res["mask"]    # np.ndarray
 out_boxes = res["bboxes"] # Python list
@@ -286,40 +319,15 @@ frame2 = sampled(image=img_tensor)
 
 ## Installation
 
-**Install from pre-built wheel** (recommended):
-
 ```bash
-# Download from releases: https://github.com/albu/sinter/releases
-pip install sinter-0.1.0-cp311-cp311-macosx_11_0_arm64.whl
+# Build and install from source
+git clone https://github.com/albu/sinter.git
+cd sinter
+pip install maturin
+maturin develop --release
 ```
 
 Sinter is **100% pure Rust + SIMD** with zero OpenCV or C++ dependencies. The only Python dependency is `numpy>=1.20` (and optionally `torch` for tensor workflows).
-
----
-
-## Development
-
-To build from source or contribute, you'll need:
-
-- Rust toolchain (1.75+)
-- maturin
-
-```bash
-# Install build dependencies
-pip install maturin
-
-# Build and install development wheel
-# NOTE: prefer the script below. `maturin develop`/`uv pip install` can
-# resolve a STALE sinter wheel from the uv cache (this has repeatedly
-# replaced the installed extension with an old build that fails ~64 Python
-# tests). The script builds fresh, force-installs, and verifies behavior.
-./scripts/rebuild_sinter.sh
-
-# Quick check that the installed extension matches the current source
-.venv/bin/python scripts/verify_sinter_install.py
-```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for architectural details and IR design.
 
 ---
 
@@ -333,14 +341,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for architectural details and IR design.
 
 ## Project Status
 
-This is an ongoing research project. Topics explored:
+This is an ongoing research project. Key milestones completed:
 
 - [x] Compilation & JIT-style operator fusion (LUT, matrix, geometric D4)
 - [x] Pure native SIMD architecture (zero C++ dependencies)
 - [x] Zero-copy PyTorch tensor & multi-target transformation
 - [x] High-throughput parallel batch execution (Rayon + GIL release)
 - [x] Visualization of compiled plans (`explain`, `to_mermaid`, `visualize`)
-- [ ] More photometric transform types
+- [x] Broad photometric, geometric, kernel, and dropout transform coverage
+- [x] Clean ergonomics: `Choice`, distribution engine, pass-through metadata, format inheritance
 
 ---
 

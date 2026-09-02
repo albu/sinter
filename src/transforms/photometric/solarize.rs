@@ -12,12 +12,12 @@ use std::sync::OnceLock;
 ///
 /// # Parameters
 /// - `threshold`: Threshold value in [0, 255]
-///   - Pixels above threshold are inverted: `pixel = 255 - pixel`
-///   - Pixels at or below threshold are unchanged
+///   - Pixels at or above threshold are inverted: `pixel = 255 - pixel`
+///   - Pixels below threshold are unchanged
 ///
 /// # Algorithm
 /// ```text
-/// if pixel > threshold:
+/// if pixel >= threshold:
 ///     pixel = 255 - pixel
 /// else:
 ///     pixel = pixel

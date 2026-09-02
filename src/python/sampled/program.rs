@@ -510,7 +510,32 @@ impl PySampledImageProgram {
         let exec_plan = Optimizer::new().optimize(plan);
 
         let is_inplace = inplace.unwrap_or(false);
-        let needs_copy = !is_inplace && exec_plan.mutates_input();
+        let is_c_contiguous = array
+            .getattr("flags")
+            .and_then(|f| f.getattr("c_contiguous"))
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(true);
+
+        if is_inplace && !is_c_contiguous {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot mutate non-contiguous array with inplace=True; use inplace=False to allow defensive copy",
+            ));
+        }
+
+        if is_inplace && exec_plan.mutates_input() {
+            let is_writeable = array
+                .getattr("flags")
+                .and_then(|f| f.getattr("writeable"))
+                .and_then(|w| w.extract::<bool>())
+                .unwrap_or(true);
+            if !is_writeable {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate read-only array with inplace=True; use inplace=False to create a defensive copy",
+                ));
+            }
+        }
+
+        let needs_copy = (!is_inplace && exec_plan.mutates_input()) || !is_c_contiguous;
         let working_array = if needs_copy {
             array.call_method0("copy")?
         } else {
@@ -545,23 +570,44 @@ impl PySampledImageProgram {
             match result {
                 Some(new_barrier) => {
                     let (new_h, new_w, new_c) = (new_barrier.height, new_barrier.width, new_barrier.channels);
-                    let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
-                    if new_c == 1 {
-                        let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Failed to reshape array: {}",
-                                e
-                            ))
-                        })?;
-                        Ok(array_2d.as_ref())
+                    if let Some(f32_data) = new_barrier.f32_data {
+                        let array_1d = numpy::PyArray1::from_vec(py, f32_data);
+                        if new_c == 1 {
+                            let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_2d.as_ref())
+                        } else {
+                            let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_3d.as_ref())
+                        }
                     } else {
-                        let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Failed to reshape array: {}",
-                                e
-                            ))
-                        })?;
-                        Ok(array_3d.as_ref())
+                        let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
+                        if new_c == 1 {
+                            let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_2d.as_ref())
+                        } else {
+                            let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_3d.as_ref())
+                        }
                     }
                 }
                 None => Ok(array2.as_ref()),
@@ -765,7 +811,32 @@ impl PySampledImageProgram {
         let exec_plan = Optimizer::new().optimize(plan);
 
         let is_inplace = inplace.unwrap_or(false);
-        let needs_copy = !is_inplace && exec_plan.mutates_input();
+        let is_c_contiguous = mask
+            .getattr("flags")
+            .and_then(|f| f.getattr("c_contiguous"))
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(true);
+
+        if is_inplace && !is_c_contiguous {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot mutate non-contiguous mask with inplace=True; use inplace=False to allow defensive copy",
+            ));
+        }
+
+        if is_inplace && exec_plan.mutates_input() {
+            let is_writeable = mask
+                .getattr("flags")
+                .and_then(|f| f.getattr("writeable"))
+                .and_then(|w| w.extract::<bool>())
+                .unwrap_or(true);
+            if !is_writeable {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate read-only mask with inplace=True; use inplace=False to create a defensive copy",
+                ));
+            }
+        }
+
+        let needs_copy = (!is_inplace && exec_plan.mutates_input()) || !is_c_contiguous;
         let working_mask = if needs_copy {
             mask.call_method0("copy")?
         } else {

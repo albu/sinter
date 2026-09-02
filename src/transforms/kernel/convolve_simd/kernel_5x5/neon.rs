@@ -170,16 +170,16 @@ pub unsafe fn convolve_1d_vertical_neon_5(image: &mut FusableImage, kernel: &[i3
                 let row2 = data.as_ptr().add(((y + 2) * width + x_start) * 3) as *const u8;
 
                 // Load 8 RGB pixels from each row
-                let p_2 = vld3q_u8(row_2);
-                let p_1 = vld3q_u8(row_1);
-                let p0 = vld3q_u8(row0);
-                let p1 = vld3q_u8(row1);
-                let p2 = vld3q_u8(row2);
+                let p_2 = vld3_u8(row_2);
+                let p_1 = vld3_u8(row_1);
+                let p0 = vld3_u8(row0);
+                let p1 = vld3_u8(row1);
+                let p2 = vld3_u8(row2);
 
                 // Apply [1 4 6 4 1] kernel vertically to all 8 pixels
-                let r_blur = blur5_scalar_to_u8(vget_low_u8(p_2.0), vget_low_u8(p_1.0), vget_low_u8(p0.0), vget_low_u8(p1.0), vget_low_u8(p2.0));
-                let g_blur = blur5_scalar_to_u8(vget_low_u8(p_2.1), vget_low_u8(p_1.1), vget_low_u8(p0.1), vget_low_u8(p1.1), vget_low_u8(p2.1));
-                let b_blur = blur5_scalar_to_u8(vget_low_u8(p_2.2), vget_low_u8(p_1.2), vget_low_u8(p0.2), vget_low_u8(p1.2), vget_low_u8(p2.2));
+                let r_blur = blur5_scalar_to_u8(p_2.0, p_1.0, p0.0, p1.0, p2.0);
+                let g_blur = blur5_scalar_to_u8(p_2.1, p_1.1, p0.1, p1.1, p2.1);
+                let b_blur = blur5_scalar_to_u8(p_2.2, p_1.2, p0.2, p1.2, p2.2);
 
                 // Store results
                 let out_ptr = output.as_mut_ptr().add((y * width + x_start) * 3) as *mut u8;

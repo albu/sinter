@@ -649,6 +649,43 @@ pub fn convolve_3x3_fast(
     let mut output = vec![0u8; data.len()];
     let stride = width * channels;
 
+    if width < 2 || height < 2 {
+        for y in 0..height {
+            let y_prev = y.saturating_sub(1);
+            let y_next = (y + 1).min(height - 1);
+            let row_curr = y * stride;
+            let row_prev = y_prev * stride;
+            let row_next = y_next * stride;
+
+            for x in 0..width {
+                let x_prev = x.saturating_sub(1);
+                let x_next = (x + 1).min(width - 1);
+
+                for c in 0..channels {
+                    let p = [
+                        data[row_prev + x_prev * channels + c] as i32,
+                        data[row_prev + x * channels + c] as i32,
+                        data[row_prev + x_next * channels + c] as i32,
+                        data[row_curr + x_prev * channels + c] as i32,
+                        data[row_curr + x * channels + c] as i32,
+                        data[row_curr + x_next * channels + c] as i32,
+                        data[row_next + x_prev * channels + c] as i32,
+                        data[row_next + x * channels + c] as i32,
+                        data[row_next + x_next * channels + c] as i32,
+                    ];
+                    let mut sum = 0i32;
+                    for i in 0..9 {
+                        sum += p[i] * kernel[i];
+                    }
+                    let val = (sum / scale).saturating_add(offset);
+                    output[row_curr + x * channels + c] = val.clamp(0, 255) as u8;
+                }
+            }
+        }
+        data.copy_from_slice(&output);
+        return;
+    }
+
     // Top and bottom border rows
     for y in [0, height - 1] {
         let y_prev = y.saturating_sub(1);

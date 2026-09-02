@@ -131,6 +131,7 @@ fn test_oneof_selects_one() {
             RandomImageNode::HorizontalFlip,
             RandomImageNode::VerticalFlip,
         ],
+        weights: None,
     };
     let mut rng = MockRng::new(0.5, vec![0]); // Select index 0
     let mut ctx = SamplingContext::new(&mut rng, 42, 0);

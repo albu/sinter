@@ -244,7 +244,15 @@ class Compose:
     Supports automatic operator fusion, zero-copy multi-target transformations
     (images, bboxes, keypoints, masks), and deterministic sampling.
     """
-    def __init__(self, transforms: Optional[Sequence[Any]] = None) -> None: ...
+    default_bbox_format: Optional[str]
+    default_keypoint_format: Optional[str]
+    def __init__(
+        self,
+        transforms: Optional[Sequence[Any]] = None,
+        bbox_format: Optional[BBoxFormat] = None,
+        keypoint_format: Optional[KeypointFormat] = None,
+        p: Optional[DistInput] = None,
+    ) -> None: ...
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
     def __getitem__(self, index: Union[int, slice]) -> Union[Any, "Compose"]: ...
@@ -255,7 +263,7 @@ class Compose:
     def summary(self, seed: Optional[int] = None) -> str: ...
     def to_json(self, seed: Optional[int] = None) -> str: ...
     def to_mermaid(self, seed: Optional[int] = None, direction: str = "LR") -> str: ...
-    def visualize(self, seed: Optional[int] = None, direction: str = "LR") -> str: ...
+    def visualize(self, seed: Optional[int] = None, direction: str = "LR") -> None: ...
     def sample(self, seed: Optional[int] = None) -> SampledImageProgram: ...
     def sample_with_seed(self, seed: int) -> SampledImageProgram: ...
     def __call__(
@@ -265,10 +273,14 @@ class Compose:
         keypoints: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
         masks: Optional[Union[np.ndarray, Any]] = None,
         mask: Optional[Union[np.ndarray, Any]] = None,
-        bbox_format: BBoxFormat = "xywh",
-        keypoint_format: KeypointFormat = "xy",
+        bbox: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        keypoint: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        bbox_format: Optional[BBoxFormat] = None,
+        keypoint_format: Optional[KeypointFormat] = None,
         seed: Optional[int] = None,
         inplace: bool = False,
+        labels: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]: ...
     def apply(
         self,
@@ -283,6 +295,55 @@ class Compose:
         num_threads: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> Union[List[Any], np.ndarray, Any]: ...
+
+class Identity:
+    """No-op identity transform that leaves inputs unchanged."""
+    p: DistInput
+    def __init__(self, p: Optional[DistInput] = None) -> None: ...
+    def __call__(
+        self,
+        image: Union[np.ndarray, Any],
+        bboxes: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        keypoints: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        masks: Optional[Union[np.ndarray, Any]] = None,
+        mask: Optional[Union[np.ndarray, Any]] = None,
+        bbox: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        keypoint: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        bbox_format: BBoxFormat = "xywh",
+        keypoint_format: KeypointFormat = "xy",
+        inplace: bool = False,
+        **kwargs: Any,
+    ) -> Union[np.ndarray, Dict[str, Any]]: ...
+    def apply(self, array: Union[np.ndarray, Any], inplace: bool = False) -> Union[np.ndarray, Any]: ...
+
+class Choice:
+    """Select and execute exactly one transform from a sequence of candidates."""
+    p: DistInput
+    weights: Optional[List[float]]
+    def __init__(
+        self,
+        transforms: Sequence[Any],
+        weights: Optional[Sequence[float]] = None,
+        p: Optional[DistInput] = None,
+    ) -> None: ...
+    def __len__(self) -> int: ...
+    def __call__(
+        self,
+        image: Union[np.ndarray, Any],
+        bboxes: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        keypoints: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        masks: Optional[Union[np.ndarray, Any]] = None,
+        mask: Optional[Union[np.ndarray, Any]] = None,
+        bbox: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        keypoint: Optional[Union[np.ndarray, Sequence[Any], Any]] = None,
+        bbox_format: BBoxFormat = "xywh",
+        keypoint_format: KeypointFormat = "xy",
+        inplace: bool = False,
+        **kwargs: Any,
+    ) -> Union[np.ndarray, Dict[str, Any]]: ...
+    def apply(self, array: Union[np.ndarray, Any], inplace: bool = False) -> Union[np.ndarray, Any]: ...
+
+OneOf = Choice
 
 # =============================================================================
 # Geometric Transforms

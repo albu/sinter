@@ -19,6 +19,10 @@ impl MatrixExecutor {
     /// * `matrix` - 3x3 transformation matrix (row-major)
     #[cfg(target_arch = "aarch64")]
     pub fn apply(image: &mut FusableImage, matrix: &[[f32; 3]; 3]) {
+        assert_eq!(
+            image.channels, 3,
+            "Matrix transforms only work with RGB images (3 channels)"
+        );
         let data = &mut image.data;
         let len = data.len();
 
@@ -316,8 +320,27 @@ impl MatrixExecutor {
 
     #[cfg(not(target_arch = "aarch64"))]
     pub fn apply(image: &mut FusableImage, matrix: &[[f32; 3]; 3]) {
-        // Scalar fallback for other architectures
-        super::apply_matrix(image, matrix);
+        assert_eq!(
+            image.channels, 3,
+            "Matrix transforms only work with RGB images (3 channels)"
+        );
+        let data = &mut image.data;
+        let len = data.len();
+        let num_pixels = len / 3;
+        for p in 0..num_pixels {
+            let i = p * 3;
+            let r = data[i] as f32;
+            let g = data[i + 1] as f32;
+            let b = data[i + 2] as f32;
+
+            let out_r = (matrix[0][0] * r + matrix[0][1] * g + matrix[0][2] * b).clamp(0.0, 255.0) as u8;
+            let out_g = (matrix[1][0] * r + matrix[1][1] * g + matrix[1][2] * b).clamp(0.0, 255.0) as u8;
+            let out_b = (matrix[2][0] * r + matrix[2][1] * g + matrix[2][2] * b).clamp(0.0, 255.0) as u8;
+
+            data[i] = out_r;
+            data[i + 1] = out_g;
+            data[i + 2] = out_b;
+        }
     }
 
     /// Execute multiple matrix operations in a single fused pass

@@ -42,7 +42,7 @@ macro_rules! register_classes {
 #[cfg(feature = "python")]
 use transforms::{
     PyAffine, PyAutoContrast, PyBrightness, PyChannelShuffle, PyCoarseDropout, PyColorBalance,
-    PyColorTemperature, PyColorTint, PyCompose, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
+    PyColorTemperature, PyColorTint, PyCompose, PyChoice, PyIdentity, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
     PyEqualize, PyGamma, PyGaussNoise, PyGaussianBlur, PyGaussianBlurSigma, PyGridDropout,
     PyHorizontalFlip, PyHueSaturationValue, PyInvert, PyMedianBlur, PyMultiplicativeNoise,
     PyNormalize, PyPad, PyPosterize, PyRandomCrop, PyRGBShift, PyResize, PyRotate,
@@ -142,8 +142,11 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
         PyEdgeDetection,
     );
 
-    // Main compose
+    // Main compose, choice, identity
     m.add_class::<PyCompose>()?;
+    m.add_class::<PyChoice>()?;
+    m.add_class::<PyIdentity>()?;
+    m.add("OneOf", m.getattr("Choice")?)?;
 
     // ===== ENUMS =====
     register_classes!(

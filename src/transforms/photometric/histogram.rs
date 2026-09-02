@@ -45,6 +45,11 @@ impl Equalize {
                 let val = ((sum - hist[i]) as f32 * scale).round() as i32;
                 lut[j] = val.clamp(0, 255) as u8;
             }
+        } else {
+            // Identity LUT for uniform/flat images (matching OpenCV equalizeHist)
+            for j in 0..256 {
+                lut[j] = j as u8;
+            }
         }
         lut
     }
@@ -98,6 +103,31 @@ impl Executable for Equalize {
 
             let luts = [lut_r, lut_g, lut_b];
             LutExecutor::apply_rgb_luts(image, &luts);
+        } else if channels == 4 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let mut i = 0;
+            let len = image.data.len();
+            while i + 4 <= len {
+                hist_r[image.data[i] as usize] += 1;
+                hist_g[image.data[i + 1] as usize] += 1;
+                hist_b[image.data[i + 2] as usize] += 1;
+                i += 4;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+
+            let mut i = 0;
+            while i + 4 <= len {
+                image.data[i] = lut_r[image.data[i] as usize];
+                image.data[i + 1] = lut_g[image.data[i + 1] as usize];
+                image.data[i + 2] = lut_b[image.data[i + 2] as usize];
+                i += 4;
+            }
         } else {
             let mut hist = [0u32; 256];
             for &pixel in image.data.iter() {

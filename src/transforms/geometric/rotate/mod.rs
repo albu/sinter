@@ -251,19 +251,21 @@ impl Executable for Rotate {
                 } else {
                     rotated_data.copy_from_slice(&image.data);
                     let pixel_count = rotated_data.len() / channels;
-                    let ptr = rotated_data.as_mut_ptr();
-                    let mut left = 0;
-                    let mut right = pixel_count - 1;
-                    while left < right {
-                        unsafe {
-                            std::ptr::swap_nonoverlapping(
-                                ptr.add(left * channels),
-                                ptr.add(right * channels),
-                                channels,
-                            );
+                    if pixel_count > 0 {
+                        let ptr = rotated_data.as_mut_ptr();
+                        let mut left = 0;
+                        let mut right = pixel_count - 1;
+                        while left < right {
+                            unsafe {
+                                std::ptr::swap_nonoverlapping(
+                                    ptr.add(left * channels),
+                                    ptr.add(right * channels),
+                                    channels,
+                                );
+                            }
+                            left += 1;
+                            right -= 1;
                         }
-                        left += 1;
-                        right -= 1;
                     }
                 }
             }

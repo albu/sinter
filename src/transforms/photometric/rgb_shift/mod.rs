@@ -147,12 +147,26 @@ impl Executable for RGBShift {
                     i += 3;
                 }
             }
+        } else if image.channels == 4 {
+            // RGBA image - shift RGB and preserve Alpha
+            let r_shift = self.r_shift.round() as i16;
+            let g_shift = self.g_shift.round() as i16;
+            let b_shift = self.b_shift.round() as i16;
+            let len = image.data.len();
+            let mut i = 0;
+            while i + 4 <= len {
+                image.data[i] = (image.data[i] as i16 + r_shift).clamp(0, 255) as u8;
+                image.data[i + 1] = (image.data[i + 1] as i16 + g_shift).clamp(0, 255) as u8;
+                image.data[i + 2] = (image.data[i + 2] as i16 + b_shift).clamp(0, 255) as u8;
+                i += 4;
+            }
         } else {
-            // Grayscale image - apply average shift
+            // Grayscale image - apply average shift (consistent integer rounding)
             let avg_shift = (self.r_shift + self.g_shift + self.b_shift) / 3.0;
+            let shift = avg_shift.round() as i16;
             for px in image.data.iter_mut() {
-                let v = *px as f32 + avg_shift;
-                *px = v.clamp(0.0, 255.0) as u8;
+                let v = *px as i16 + shift;
+                *px = v.clamp(0, 255) as u8;
             }
         }
 

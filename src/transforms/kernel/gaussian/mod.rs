@@ -281,7 +281,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: box_blur SIMD has bugs with constant image preservation"]
     fn test_gaussian_blur_sigma_large_fast_constant() {
         // Use larger image for sigma=5.0 (box blur approximation)
         let mut data = vec![150u8; 65 * 65 * 3];
