@@ -41,7 +41,7 @@ macro_rules! register_classes {
 // Unified API transforms (with distribution support)
 #[cfg(feature = "python")]
 use transforms::{
-    PyAffine, PyAutoContrast, PyBrightness, PyChannelShuffle, PyCoarseDropout, PyColorBalance,
+    PyAffine, PyAnyRes, PyAutoContrast, PyBrightness, PyChannelShuffle, PyCoarseDropout, PyColorBalance,
     PyColorTemperature, PyColorTint, PyCompose, PyChoice, PyIdentity, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
     PyEqualize, PyGamma, PyGaussNoise, PyGaussianBlur, PyGaussianBlurSigma, PyGridDropout,
     PyHorizontalFlip, PyHueSaturationValue, PyInvert, PyMedianBlur, PyMultiplicativeNoise,
@@ -95,6 +95,7 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
         PyRandomCrop,
         PyPad,
         PyAffine,
+        PyAnyRes,
     );
 
     // Photometric transforms (parameter-based)

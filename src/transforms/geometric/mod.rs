@@ -11,6 +11,7 @@ pub mod rotate;
 pub mod pad;
 pub mod transpose;
 pub mod orientation;
+pub mod anyres;
 
 // Re-export for convenience
 pub use affine::{Affine, AffineParams};
@@ -22,3 +23,4 @@ pub use rotate::{Rotate, RotateAngle};
 pub use pad::{Pad, PadMode};
 pub use transpose::Transpose;
 pub use orientation::{Orientation, StructuralKernel};
+pub use anyres::AnyRes;

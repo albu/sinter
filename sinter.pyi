@@ -295,6 +295,20 @@ class Compose:
         num_threads: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> Union[List[Any], np.ndarray, Any]: ...
+    def apply_video(
+        self,
+        video: Union[Sequence[Any], np.ndarray, Any],
+        inplace: bool = False,
+        seed: Optional[int] = None,
+        num_threads: Optional[int] = None,
+    ) -> Union[List[Any], np.ndarray, Any]: ...
+    def apply_video_batch(
+        self,
+        videos: Union[Sequence[Any], np.ndarray, Any],
+        inplace: bool = False,
+        seed: Optional[int] = None,
+        num_threads: Optional[int] = None,
+    ) -> Union[List[Any], np.ndarray, Any]: ...
 
 class Identity:
     """No-op identity transform that leaves inputs unchanged."""
@@ -557,6 +571,27 @@ class Affine:
         inplace: bool = False,
     ) -> Union[np.ndarray, Dict[str, Any]]: ...
     def apply(self, array: np.ndarray, inplace: bool = False) -> np.ndarray: ...
+
+class AnyRes:
+    """Dynamic Tiling / AnyRes transform for modern Vision-Language Models (VLMs).
+
+    Slices an arbitrary-aspect-ratio image into an optimal grid of standard tiles
+    (e.g. 448x448 or 384x384) plus an optional global downsampled thumbnail.
+    """
+    tile_size: int
+    max_tiles: int
+    include_thumbnail: bool
+    interpolation: str
+    def __init__(
+        self,
+        tile_size: int = 448,
+        max_tiles: int = 6,
+        include_thumbnail: bool = True,
+        interpolation: str = "bilinear",
+    ) -> None: ...
+    def select_grid(self, width: int, height: int) -> Tuple[int, int]: ...
+    def __call__(self, image: Any) -> Any: ...
+    def apply(self, image: Any) -> Any: ...
 
 # =============================================================================
 # Photometric Transforms
