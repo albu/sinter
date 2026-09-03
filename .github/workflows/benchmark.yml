@@ -2,7 +2,7 @@ name: Performance Benchmarks (vs OpenCV & Albumentations)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
     branches: [main]
     paths:
       - 'src/**'
@@ -24,6 +24,14 @@ jobs:
   benchmark-macos-arm64:
     name: Benchmark on macOS ARM64 (Apple Silicon)
     runs-on: macos-14
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark') ||
+      contains(github.event.pull_request.title, '[bench]') ||
+      contains(github.event.pull_request.title, '[benchmark]') ||
+      contains(github.event.head_commit.message, '[bench]') ||
+      contains(github.event.head_commit.message, '[benchmark]')
 
     steps:
     - name: Checkout repository
