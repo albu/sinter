@@ -379,4 +379,42 @@ impl PyCompose {
             inner.sample_with_seed(base_seed.wrapping_add(idx as u64))
         })
     }
+
+    /// Apply video augmentation to a single video clip [T, C, H, W], [T, H, W, C], or list of frames
+    ///
+    /// The pipeline is sampled ONCE for the entire clip, guaranteeing temporal
+    /// consistency (all frames receive identical spatial transformations).
+    #[pyo3(signature = (video, inplace=None, seed=None, num_threads=None))]
+    pub fn apply_video<'py>(
+        &self,
+        video: &'py PyAny,
+        inplace: Option<bool>,
+        seed: Option<u64>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let seed_val = seed.unwrap_or_else(rand::random);
+        let sampled = self.inner.sample_with_seed(seed_val);
+        crate::python::batch::parallel_apply_video_clip(py, video, &sampled, inplace, num_threads)
+    }
+
+    /// Apply video augmentation to a batch of video clips [B, T, C, H, W], [B, T, H, W, C], or list of clips
+    ///
+    /// Each clip b in [0, B) receives an independently sampled program that is
+    /// applied consistently across all T frames of that clip.
+    #[pyo3(signature = (videos, inplace=None, seed=None, num_threads=None))]
+    pub fn apply_video_batch<'py>(
+        &self,
+        videos: &'py PyAny,
+        inplace: Option<bool>,
+        seed: Option<u64>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let base_seed = seed.unwrap_or_else(rand::random);
+        let inner = self.inner.clone();
+        crate::python::batch::parallel_apply_video_batch(py, videos, inplace, num_threads, move |clip_idx| {
+            inner.sample_with_seed(base_seed.wrapping_add(clip_idx as u64))
+        })
+    }
 }

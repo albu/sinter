@@ -640,6 +640,18 @@ impl PySampledImageProgram {
         })
     }
 
+    /// Apply this sampled program across all frames of a video clip [T, C, H, W], [T, H, W, C], or list of frames
+    #[pyo3(signature = (video, inplace=None, num_threads=None))]
+    pub fn apply_video<'py>(
+        &self,
+        video: &'py PyAny,
+        inplace: Option<bool>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        crate::python::batch::parallel_apply_video_clip(py, video, &self.inner, inplace, num_threads)
+    }
+
     /// Apply the program to bounding boxes (supports N, 4+ column arrays)
     ///
     /// Preserves extra payload columns (such as class labels or confidence scores)

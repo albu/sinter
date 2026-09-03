@@ -96,6 +96,27 @@ pub(crate) fn apply_node_to_image<'py>(
     compose.apply(array, inplace, None, None, py)
 }
 
+#[cfg(feature = "python")]
+pub(crate) fn apply_node_to_video<'py>(
+    node: RandomImageNode,
+    p: Dist,
+    video: &'py PyAny,
+    inplace: Option<bool>,
+    seed: Option<u64>,
+    num_threads: Option<usize>,
+    py: Python<'py>,
+) -> PyResult<&'py PyAny> {
+    let mut prog = RandomImageProgram::new();
+    prog.add(maybe_wrap(node, p));
+    let compose = PyCompose {
+        inner: prog,
+        transforms: Vec::new(),
+        default_bbox_format: None,
+        default_keypoint_format: None,
+    };
+    compose.apply_video(video, inplace, seed, num_threads, py)
+}
+
 // ============================================================================
 // Macros to reduce boilerplate
 // ============================================================================
@@ -253,6 +274,20 @@ macro_rules! define_basic_transforms {
                     let gen = $node_gen;
                     let node = gen(self);
                     apply_node_to_image(node, self.p.clone(), array, inplace, py)
+                }
+
+                #[pyo3(signature = (video, inplace=None, seed=None, num_threads=None))]
+                fn apply_video<'py>(
+                    &self,
+                    video: &'py PyAny,
+                    inplace: Option<bool>,
+                    seed: Option<u64>,
+                    num_threads: Option<usize>,
+                    py: Python<'py>,
+                ) -> PyResult<&'py PyAny> {
+                    let gen = $node_gen;
+                    let node = gen(self);
+                    apply_node_to_video(node, self.p.clone(), video, inplace, seed, num_threads, py)
                 }
 
                 fn __repr__(&self) -> String {

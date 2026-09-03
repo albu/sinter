@@ -10,7 +10,7 @@ pub mod parallel;
 pub use mixup::PyMixUp;
 pub use cutmix::PyCutMix;
 pub use mosaic::PyMosaic;
-pub use parallel::parallel_apply_batch;
+pub use parallel::{parallel_apply_batch, parallel_apply_video_batch, parallel_apply_video_clip};
 
 use crate::batch::{Batch, BatchPipeline, MixUp, CutMix, Mosaic};
 use crate::batch::label::SoftLabel;
