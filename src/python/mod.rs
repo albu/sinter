@@ -11,6 +11,8 @@ pub mod enums;
 #[cfg(feature = "python")]
 pub mod image;
 #[cfg(feature = "python")]
+pub mod io;
+#[cfg(feature = "python")]
 pub mod sampled;
 #[cfg(feature = "python")]
 pub mod tensor;
@@ -170,6 +172,18 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
 
     // PyTorch integration
     m.add_function(wrap_pyfunction!(apply_to_tensor_inplace, m)?)?;
+
+    // Native SIMD Image I/O
+    m.add_function(wrap_pyfunction!(io::py_imread, m)?)?;
+    m.add_function(wrap_pyfunction!(io::py_decode_jpeg, m)?)?;
+    m.add_function(wrap_pyfunction!(io::py_read_header, m)?)?;
+    m.add_function(wrap_pyfunction!(io::py_read_header_bytes, m)?)?;
+
+    // Convenience aliases
+    m.add("imread", m.getattr("py_imread")?)?;
+    m.add("decode_jpeg", m.getattr("py_decode_jpeg")?)?;
+    m.add("read_header", m.getattr("py_read_header")?)?;
+    m.add("read_header_bytes", m.getattr("py_read_header_bytes")?)?;
 
     Ok(())
 }

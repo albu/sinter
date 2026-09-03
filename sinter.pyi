@@ -1267,3 +1267,54 @@ def apply_to_tensor_inplace(tensor: Any, compose: Compose) -> None:
     Requires uint8 HWC CPU tensor. Raises ValueError if pipeline changes tensor shape.
     """
     ...
+
+# =============================================================================
+# Native SIMD Image I/O
+# =============================================================================
+
+def imread(path: str, crop: tuple[int, int, int, int] | None = None) -> np.ndarray:
+    """Read an image from disk directly into an RGB8 NumPy array with native SIMD decoding.
+
+    Args:
+        path: Path to the image file on disk.
+        crop: Optional (x, y, width, height) ROI crop bounding box. When provided,
+            uses native MCU block-skipping to decode only the region of interest (2x to 10x faster).
+
+    Returns:
+        uint8 NumPy ndarray of shape (H, W, 3) in RGB order.
+    """
+    ...
+
+def decode_jpeg(bytes: bytes, crop: tuple[int, int, int, int] | None = None) -> np.ndarray:
+    """Decode in-memory JPEG bytes directly into an RGB8 NumPy array.
+
+    Args:
+        bytes: Raw JPEG compressed byte buffer.
+        crop: Optional (x, y, width, height) ROI crop bounding box.
+
+    Returns:
+        uint8 NumPy ndarray of shape (H, W, 3) in RGB order.
+    """
+    ...
+
+def read_header(path: str) -> tuple[int, int, int]:
+    """Rapidly extract (width, height, channels) from file header without decoding pixels.
+
+    Args:
+        path: Path to the image file on disk.
+
+    Returns:
+        Tuple of (width, height, channels).
+    """
+    ...
+
+def read_header_bytes(bytes: bytes) -> tuple[int, int, int]:
+    """Rapidly extract (width, height, channels) from in-memory byte slice header.
+
+    Args:
+        bytes: Raw image compressed byte buffer.
+
+    Returns:
+        Tuple of (width, height, channels).
+    """
+    ...
