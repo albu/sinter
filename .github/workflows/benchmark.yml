@@ -1,0 +1,51 @@
+name: Performance Benchmarks (vs OpenCV & Albumentations)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'python/**'
+      - 'Cargo.*'
+      - '.github/workflows/benchmark.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'python/**'
+      - 'Cargo.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-macos-arm64:
+    name: Benchmark on macOS ARM64 (Apple Silicon)
+    runs-on: macos-14
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install maturin numpy opencv-python-headless albumentations torch
+
+    - name: Build and install Sinter (release with SIMD)
+      run: |
+        maturin develop --release --features "python"
+
+    - name: Run CI Benchmark Suite
+      run: |
+        python python/benchmarks/ci_benchmark.py
