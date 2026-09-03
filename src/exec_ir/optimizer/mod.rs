@@ -8,9 +8,11 @@ mod fusion_tests;
 mod type_conversions;
 mod stats;
 
-use crate::exec_ir::nodes::{ExecNode, ExecPlan};
+use crate::core::{BarrierImage, FusableImage};
+use crate::exec_ir::nodes::{ExecNode, ExecNodeKind, ExecPlan, FastKernel};
 use crate::exec_ir::fusion::{fuse_transform_block, FusionResult};
 use crate::sampled_ir::{Plan, SampledImageOp};
+use crate::transforms::{FusedLut, LutOp, Resize, ToGray};
 pub use type_conversions::{
     is_geometric_transform, is_geometric_transform_sampled, try_as_lut_op, try_as_lut_op_sampled,
     try_as_matrix_op_internal, try_as_matrix_op_sampled,
@@ -90,40 +92,85 @@ impl Optimizer {
         let mut exec_nodes = Vec::new();
         let mut current_fused: Vec<SampledImageOp> = Vec::new();
 
-        for (idx, op) in plan.ops.into_iter().enumerate() {
-            // Check for ColorJitter - decompose it into a special node
-            // ColorJitter doesn't exist in SampledImageOp (it's sampled during execution)
-            // So we skip this check for now
-            let is_color_jitter = false;
+        let mut ops = plan.ops;
+        canonicalize::hoist_crops(&mut ops);
+
+        let mut i = 0;
+        while i < ops.len() {
+            let op = &ops[i];
+
+            // Special check: Resize followed by contiguous LUT ops
+            if let SampledImageOp::Resize { width, height, interpolation } = op {
+                let new_width = *width as usize;
+                let new_height = *height as usize;
+                use crate::transforms::geometric::resize::ResizeInterpolation;
+                let interp = match interpolation {
+                    crate::sampled_ir::ops::Interpolation::Nearest => ResizeInterpolation::Nearest,
+                    crate::sampled_ir::ops::Interpolation::Bilinear => ResizeInterpolation::Bilinear,
+                    crate::sampled_ir::ops::Interpolation::Bicubic => ResizeInterpolation::Bicubic,
+                    crate::sampled_ir::ops::Interpolation::Lanczos4 => ResizeInterpolation::Lanczos4,
+                };
+
+
+                let mut lut_count = 0;
+                while i + 1 + lut_count < ops.len() && ops[i + 1 + lut_count].is_lut_op() {
+                    lut_count += 1;
+                }
+
+                if lut_count >= 1 {
+                    self.flush_fused_block(&mut exec_nodes, &mut current_fused);
+
+                    let mut group = Vec::with_capacity(1 + lut_count);
+                    group.push(op.clone());
+                    for j in 0..lut_count {
+                        group.push(ops[i + 1 + j].clone());
+                    }
+
+                    let fused_lut = FusedLut::from_sampled_ops(&group[1..]);
+                    let luts_3c = fused_lut.luts_3c;
+                    let lut_1c = fused_lut.lut;
+                    let resize = Resize::with_interpolation(new_width, new_height, interp);
+
+                    exec_nodes.push(ExecNode::with_kernel_kind(
+                        ExecNodeKind::Fused(group),
+                        crate::exec_ir::nodes::KernelKind::ResizeWithLut {
+                            resize,
+                            luts_3c: luts_3c.map(Box::new),
+                            lut_1c,
+                        },
+                    ));
+                    self.stats.push(BlockStats {
+                        input_count: 1 + lut_count,
+                        output_count: 1,
+                        strategy: FusionStrategy::Lut,
+                    });
+
+                    i += 1 + lut_count;
+                    continue;
+                }
+            }
 
             // Check if this op can be fused
-            let is_geometric = is_geometric_transform_sampled(&op);
-            let is_out_of_place = !op.is_fuseable();
+            let is_geometric = is_geometric_transform_sampled(op);
 
-            // With Phase 2 (canonicalization) and Phase 4 (extractive fusion),
-            // we can handle mixed blocks. Only flush at true barriers.
-            //
-            // The key insight: geometric transforms can compose via D4 group,
-            // and photometric transforms commute with geometry.
-            //
-            // We only need to flush at true barriers (shape changes, etc.).
             if !op.is_fuseable() && !is_geometric {
-                // True barrier (Resize, Crop, ToGray, etc.) - flush current block
+                // True barrier (Crop, etc.) - flush current block
                 self.flush_fused_block(&mut exec_nodes, &mut current_fused);
-                exec_nodes.push(ExecNode::barrier(op));
+                exec_nodes.push(ExecNode::barrier(op.clone()));
                 self.stats.push(BlockStats {
                     input_count: 1,
                     output_count: 1,
                     strategy: FusionStrategy::None,
                 });
+                i += 1;
                 continue;
             }
 
-            // All other transforms (including OutOfPlace geometric) can fuse
             if matches!(self.debug, OptimizerDebug::Verbose) {
-                println!("Op {}: Adding to fuseable block", idx);
+                println!("Op {}: Adding to fuseable block", i);
             }
-            current_fused.push(op);
+            current_fused.push(op.clone());
+            i += 1;
         }
 
         // Flush remaining fused block
@@ -131,6 +178,7 @@ impl Optimizer {
 
         ExecPlan::from_nodes_with_stats(exec_nodes, self.stats.clone())
     }
+
 
     /// Flush a fused block of transforms, applying all fusion optimizations
     fn flush_fused_block(

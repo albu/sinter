@@ -217,7 +217,7 @@ where
         for (idx, item) in py_items.iter().enumerate() {
             let prog = get_program(idx);
             let py_prog = crate::python::sampled::PySampledImageProgram { inner: prog };
-            let transformed = py_prog.apply(item, Some(is_inplace), py)?;
+            let transformed = py_prog.apply(item, Some(is_inplace), None, py)?;
             results.push(transformed);
         }
 

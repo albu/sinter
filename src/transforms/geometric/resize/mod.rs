@@ -209,7 +209,71 @@ impl Resize {
             alignment: 0,
         }
     }
+
+    /// Apply resize and subsequent LUT transform in a single execution step
+    pub fn apply_with_lut(
+        &self,
+        image: &FusableImage,
+        luts_3c: Option<&[[u8; 256]; 3]>,
+        lut_1c: &[u8; 256],
+    ) -> BarrierImage {
+        let old_width = image.width;
+        let old_height = image.height;
+        let channels = image.channels;
+        let new_size = self.new_width * self.new_height * channels;
+        let mut new_data = Vec::with_capacity(new_size);
+        unsafe { new_data.set_len(new_size); }
+
+        let luts = if let Some(l) = luts_3c {
+            *l
+        } else {
+            [*lut_1c, *lut_1c, *lut_1c]
+        };
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            neon::resize_with_lut_neon(
+                &image.data,
+                &mut new_data,
+                old_width,
+                old_height,
+                self.new_width,
+                self.new_height,
+                channels,
+                self.interpolation,
+                &luts,
+            );
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut barrier = self.apply_owned(image);
+            let mut view = FusableImage::new(&mut barrier.data, self.new_width, self.new_height, barrier.channels);
+            if let Some(luts) = luts_3c {
+                if barrier.channels == 3 {
+                    crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(&mut view, luts);
+                } else {
+                    crate::transforms::runtime::lut::LutExecutor::apply(&mut view, &luts[0]);
+                }
+            } else {
+                crate::transforms::runtime::lut::LutExecutor::apply(&mut view, lut_1c);
+            }
+            return barrier;
+        }
+
+        BarrierImage {
+            data: new_data,
+            f32_data: None,
+            width: self.new_width,
+            height: self.new_height,
+            channels,
+            stride: self.new_width * channels,
+            alignment: 0,
+        }
+    }
 }
+
+
 
 impl Transform for Resize {
     fn access(&self) -> AccessPattern {

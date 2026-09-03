@@ -343,7 +343,7 @@ impl PySampledImageProgram {
     ///
     /// # Returns
     /// Dictionary with keys: "image", and optionally "bboxes", "keypoints", "masks"
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None, optimize=None))]
     pub(crate) fn __call__<'py>(
         &self,
         image: &'py PyAny,
@@ -354,9 +354,10 @@ impl PySampledImageProgram {
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
-        let transformed_image_array = self.apply(image, inplace, py)?;
+        let transformed_image_array = self.apply(image, inplace, optimize, py)?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("image", transformed_image_array)?;
@@ -471,16 +472,17 @@ impl PySampledImageProgram {
     ///
     /// # Returns
     /// A transformed numpy array or torch.Tensor matching the input type and layout
-    #[pyo3(signature = (array, inplace=None))]
+    #[pyo3(signature = (array, inplace=None, optimize=None))]
     pub(crate) fn apply<'py>(
         &self,
         array: &'py PyAny,
         inplace: Option<bool>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<&'py PyAny> {
         if crate::python::tensor::is_torch_tensor(array) {
             return crate::python::tensor::handle_torch_tensor(array, inplace, py, |np_arr, inp, p| {
-                self.apply(np_arr, inp, p)
+                self.apply(np_arr, inp, optimize, p)
             });
         }
 
@@ -506,8 +508,12 @@ impl PySampledImageProgram {
         // Convert SampledImageProgram to Plan
         let plan = self.inner.to_plan();
 
-        // Optimize the plan
-        let exec_plan = Optimizer::new().optimize(plan);
+        // Optimize the plan (or keep unoptimized if optimize=False)
+        let exec_plan = if optimize.unwrap_or(true) {
+            Optimizer::new().optimize(plan)
+        } else {
+            plan.to_unoptimized_exec_plan()
+        };
 
         let is_inplace = inplace.unwrap_or(false);
         let is_c_contiguous = array

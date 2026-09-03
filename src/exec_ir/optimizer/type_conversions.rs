@@ -6,7 +6,7 @@ use crate::core::Transform;
 use crate::sampled_ir::SampledImageOp;
 use crate::transforms::{
     Brightness, ColorJitter, Contrast, FusedLut, Gamma, Invert, LutOp, Normalize, Posterize,
-    Solarize,
+    RGBShift, Solarize,
 };
 use crate::transforms::{
     ChannelMix, ChannelOrder, ChannelShuffle, ColorBalance, ColorTemperature, ColorTint,
@@ -60,6 +60,11 @@ pub fn try_as_lut_op(transform: &dyn Transform) -> Option<Box<dyn LutOp>> {
         return Some(Box::new(f.clone()));
     }
 
+    // Try RGBShift
+    if let Some(r) = transform.as_any().downcast_ref::<RGBShift>() {
+        return Some(Box::new(r.clone()));
+    }
+
     None
 }
 
@@ -80,6 +85,9 @@ fn try_sampled_as_lut_op(sampled: &SampledImageOp) -> Option<Box<dyn LutOp>> {
         // Normalize: NOT LUT-fusable (float32 terminal barrier)
         SampledImageOp::Posterize { bits } => Some(Box::new(Posterize::new(*bits))),
         SampledImageOp::Solarize { threshold } => Some(Box::new(Solarize::new(*threshold))),
+        SampledImageOp::RGBShift { r_shift, g_shift, b_shift } => {
+            Some(Box::new(RGBShift::new(*r_shift as f32, *g_shift as f32, *b_shift as f32)))
+        }
         _ => None,
     }
 }

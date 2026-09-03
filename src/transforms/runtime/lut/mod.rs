@@ -49,11 +49,29 @@ pub trait LutOp: fmt::Debug {
         self.build_lut()
     }
 
+    /// Build the 3-channel (RGB) 256-entry LUTs for this transform.
+    /// Default implementation uses the single-channel LUT across all 3 channels.
+    fn build_lut_3c(&self) -> [[u8; 256]; 3] {
+        let lut = self.build_lut();
+        [lut, lut, lut]
+    }
+
+    /// Whether this LUT operation produces different LUTs per channel.
+    fn is_3c(&self) -> bool {
+        false
+    }
+
     /// Execute using LUT (default implementation)
     ///
     /// Transforms can override this for specialized behavior.
     fn execute_with_lut(&self, image: &mut crate::core::FusableImage) {
-        let lut = self.get_lut();
-        LutExecutor::apply(image, &lut);
+        if self.is_3c() && image.channels == 3 {
+            let luts = self.build_lut_3c();
+            LutExecutor::apply_rgb_luts(image, &luts);
+        } else {
+            let lut = self.get_lut();
+            LutExecutor::apply(image, &lut);
+        }
     }
 }
+

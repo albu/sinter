@@ -53,7 +53,41 @@ impl Equalize {
         }
         lut
     }
+
+    /// Compute RGB or Grayscale LUTs from image histogram without applying them
+    pub fn build_luts_from_image(image: &FusableImage) -> Option<[[u8; 256]; 3]> {
+        let channels = image.channels;
+        let total_pixels = (image.width * image.height) as u32;
+
+        if channels == 3 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let chunks = image.data.chunks_exact(3);
+            for chunk in chunks {
+                hist_r[chunk[0] as usize] += 1;
+                hist_g[chunk[1] as usize] += 1;
+                hist_b[chunk[2] as usize] += 1;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+            Some([lut_r, lut_g, lut_b])
+        } else if channels == 1 {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, total_pixels);
+            Some([lut, lut, lut])
+        } else {
+            None
+        }
+    }
 }
+
 
 impl Transform for Equalize {
     fn access(&self) -> AccessPattern {
@@ -169,7 +203,7 @@ impl AutoContrast {
     /// Build contrast stretch LUT from image min/max
     ///
     /// Uses fixed-point arithmetic to avoid float operations.
-    fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
+    pub fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
         let (lo, hi) = if self.cutoff == 0.0 {
             #[cfg(target_arch = "aarch64")]
             unsafe {

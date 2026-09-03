@@ -214,7 +214,7 @@ impl PyCompose {
     }
 
     /// Apply transforms to image and multimodal targets (dict interface)
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox=None, keypoint=None, bbox_format=None, keypoint_format=None, seed=None, inplace=None, labels=None, **kwargs))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox=None, keypoint=None, bbox_format=None, keypoint_format=None, seed=None, inplace=None, labels=None, optimize=None, **kwargs))]
     pub(crate) fn __call__<'py>(
         &self,
         image: &'py PyAny,
@@ -229,6 +229,7 @@ impl PyCompose {
         seed: Option<u64>,
         inplace: Option<bool>,
         labels: Option<&'py PyAny>,
+        optimize: Option<bool>,
         kwargs: Option<&'py PyDict>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
@@ -293,6 +294,7 @@ impl PyCompose {
             effective_bbox_format,
             effective_keypoint_format,
             inplace,
+            optimize,
             py,
         )?;
 
@@ -327,12 +329,13 @@ impl PyCompose {
     ///
     /// This is a convenience method that returns only the transformed image.
     /// Default `inplace=False` ensures input arrays are never mutated.
-    #[pyo3(signature = (array, inplace=None, seed=None))]
+    #[pyo3(signature = (array, inplace=None, seed=None, optimize=None))]
     pub(crate) fn apply<'py>(
         &self,
         array: &'py PyAny,
         inplace: Option<bool>,
         seed: Option<u64>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<&'py PyAny> {
         let is_4d = if crate::python::tensor::is_torch_tensor(array) {
@@ -355,7 +358,7 @@ impl PyCompose {
             inner: sampled_inner,
         };
 
-        sampled.apply(array, inplace, py)
+        sampled.apply(array, inplace, optimize, py)
     }
 
     /// Apply this pipeline to a batch of images in parallel across CPU cores

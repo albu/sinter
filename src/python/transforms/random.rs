@@ -71,6 +71,7 @@ pub(crate) fn apply_node_to_targets<'py>(
         None,
         inplace,
         None, // labels
+        None, // optimize
         None, // kwargs
         py,
     )
@@ -92,7 +93,7 @@ pub(crate) fn apply_node_to_image<'py>(
         default_bbox_format: None,
         default_keypoint_format: None,
     };
-    compose.apply(array, inplace, None, py)
+    compose.apply(array, inplace, None, None, py)
 }
 
 // ============================================================================

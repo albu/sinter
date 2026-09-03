@@ -522,17 +522,20 @@ fn test_geometric_d4_fusion() {
 
 #[test]
 fn test_barriers_block_fusion() {
-    // Test that barriers (Resize) block LUT fusion
+    // Test that non-commutative barriers (Pad) block LUT fusion
     use crate::sampling::Dist;
 
     let transforms = vec![
         RandomImageNode::Brightness {
             delta: Dist::Constant(10.0),
         },
-        RandomImageNode::Resize {
-            width: 50,
-            height: 50,
-            interpolation: crate::sampled_ir::ops::Interpolation::Bilinear,
+        RandomImageNode::Pad {
+            top: Dist::Constant(10.0),
+            bottom: Dist::Constant(10.0),
+            left: Dist::Constant(10.0),
+            right: Dist::Constant(10.0),
+            mode: crate::sampled_ir::ops::PadMode::Constant { value: 0 },
+            value: 0,
         },
         RandomImageNode::Contrast {
             factor: Dist::Constant(1.1),
@@ -546,7 +549,7 @@ fn test_barriers_block_fusion() {
     let mut optimizer = Optimizer::new();
     let exec_plan = optimizer.optimize(plan);
 
-    // Should have 3 nodes (Resize is a barrier)
+    // Should have 3 nodes (GaussianBlur is a spatial non-commutative barrier)
     assert_eq!(
         exec_plan.len(),
         3,
@@ -554,7 +557,7 @@ fn test_barriers_block_fusion() {
         exec_plan.len()
     );
 
-    // Verify structure: Fused(Brightness) + Barrier(Resize) + Fused(Contrast)
+    // Verify structure: Fused(Brightness) + Barrier(GaussianBlur) + Fused(Contrast)
     match &exec_plan.nodes[0].kind {
         crate::exec_ir::nodes::ExecNodeKind::Fused(ops) => {
             assert_eq!(ops.len(), 1);
@@ -576,6 +579,93 @@ fn test_barriers_block_fusion() {
         _ => panic!("Node 2 should be Fused"),
     }
 }
+
+#[test]
+fn test_crop_hoisting_and_lut_fusion() {
+    use crate::sampling::Dist;
+
+    // Brightness -> Crop -> Contrast should hoist Crop to the front,
+    // allowing Brightness and Contrast to fuse together!
+    let transforms = vec![
+        RandomImageNode::Brightness {
+            delta: Dist::Constant(10.0),
+        },
+        RandomImageNode::Crop {
+            x: Dist::Constant(0.0),
+            y: Dist::Constant(0.0),
+            width: Dist::Constant(50.0),
+            height: Dist::Constant(50.0),
+        },
+        RandomImageNode::Contrast {
+            factor: Dist::Constant(1.1),
+        },
+    ];
+
+    let program = create_program(transforms);
+    let sampled = program.sample_with_seed(42);
+
+    let plan = sampled.to_plan();
+    let mut optimizer = Optimizer::new();
+    let exec_plan = optimizer.optimize(plan);
+
+    // Should have 2 nodes: Barrier(Crop) + Fused(Brightness + Contrast)
+    assert_eq!(
+        exec_plan.len(),
+        2,
+        "Expected 2 execution nodes (Crop hoisted, LUTs fused), got {}",
+        exec_plan.len()
+    );
+
+    match &exec_plan.nodes[0].kind {
+        crate::exec_ir::nodes::ExecNodeKind::Barrier(_) => {
+            // Crop hoisted to the front!
+        }
+        _ => panic!("Node 0 should be Barrier(Crop)"),
+    }
+
+    match &exec_plan.nodes[1].kind {
+        crate::exec_ir::nodes::ExecNodeKind::Fused(ops) => {
+            assert_eq!(ops.len(), 2, "Brightness and Contrast should be fused together!");
+        }
+        _ => panic!("Node 1 should be Fused(Brightness + Contrast)"),
+    }
+}
+
+
+#[test]
+fn test_resize_lut_output_fusion() {
+    use crate::sampling::Dist;
+
+    let transforms = vec![
+        RandomImageNode::Resize {
+            width: 50,
+            height: 50,
+            interpolation: crate::sampled_ir::ops::Interpolation::Nearest,
+        },
+        RandomImageNode::Brightness {
+            delta: Dist::Constant(10.0),
+        },
+        RandomImageNode::Contrast {
+            factor: Dist::Constant(1.1),
+        },
+    ];
+
+    let program = create_program(transforms);
+    let sampled = program.sample_with_seed(42);
+
+    let plan = sampled.to_plan();
+    let mut optimizer = Optimizer::new();
+    let exec_plan = optimizer.optimize(plan);
+
+    // Resize + Brightness + Contrast fuses into 1 node!
+    assert_eq!(
+        exec_plan.len(),
+        1,
+        "Expected 1 execution node (Resize + LUT fused), got {}",
+        exec_plan.len()
+    );
+}
+
 
 #[test]
 fn test_four_geometric_fuses_to_identity() {

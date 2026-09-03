@@ -65,6 +65,18 @@ impl Plan {
         self.ops.is_empty()
     }
 
+    /// Convert this plan to an unoptimized execution plan (no fusion, no reordering).
+    /// Each operation is executed one-by-one as an individual barrier node in original order.
+    pub fn to_unoptimized_exec_plan(&self) -> crate::exec_ir::ExecPlan {
+        let nodes = self
+            .ops
+            .iter()
+            .cloned()
+            .map(crate::exec_ir::ExecNode::barrier)
+            .collect();
+        crate::exec_ir::ExecPlan::from_nodes(nodes)
+    }
+
     /// Get an iterator over the operations
     pub fn iter(&self) -> impl Iterator<Item = &SampledImageOp> {
         self.ops.iter()

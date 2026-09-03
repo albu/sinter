@@ -43,6 +43,48 @@ pub unsafe fn resize_neon(
     }
 }
 
+/// Fused resize + LUT application
+pub unsafe fn resize_with_lut_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+    channels: usize,
+    interpolation: ResizeInterpolation,
+    luts: &[[u8; 256]; 3],
+) {
+    if interpolation == ResizeInterpolation::Nearest
+        && channels == 3
+        && src_width == dst_width * 2
+        && src_height == dst_height * 2
+    {
+        resize_nearest_down2_rgb_lut_neon(src, dst, src_width, src_height, dst_width, dst_height, luts);
+        return;
+    }
+
+    if (interpolation == ResizeInterpolation::Bilinear || interpolation == ResizeInterpolation::Bicubic)
+        && channels == 3
+        && src_width == dst_width * 2
+        && src_height == dst_height * 2
+    {
+        resize_bilinear_down2_rgb_lut_neon(src, dst, src_width, src_height, dst_width, dst_height, luts);
+        return;
+    }
+
+    // Default: resize first, then apply LUT in place
+    resize_neon(src, dst, src_width, src_height, dst_width, dst_height, channels, interpolation);
+    let mut view = crate::core::FusableImage::new(dst, dst_width, dst_height, channels);
+    if luts[0] == luts[1] && luts[1] == luts[2] {
+        crate::transforms::runtime::lut::LutExecutor::apply(&mut view, &luts[0]);
+    } else if channels == 3 {
+        crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(&mut view, luts);
+    }
+}
+
+
+
 // ============================================================================
 // Nearest-Neighbor Interpolation
 // ============================================================================
@@ -164,6 +206,64 @@ unsafe fn resize_nearest_down2_rgb_neon(
         }
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn resize_nearest_down2_rgb_lut_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    src_width: usize,
+    _src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+    luts: &[[u8; 256]; 3],
+) {
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let src_stride = src_width * 3;
+    let dst_stride = dst_width * 3;
+    let lut_r = luts[0].as_ptr();
+    let lut_g = luts[1].as_ptr();
+    let lut_b = luts[2].as_ptr();
+
+    for y in 0..dst_height {
+        let s_row = src_ptr.add(y * 2 * src_stride);
+        let d_row = dst_ptr.add(y * dst_stride);
+        let mut x = 0;
+        while x + 4 <= dst_width {
+            let in_x = x * 6;
+            let d = d_row.add(x * 3);
+            let s = s_row.add(in_x);
+
+            *d = *lut_r.add(*s as usize);
+            *d.add(1) = *lut_g.add(*s.add(1) as usize);
+            *d.add(2) = *lut_b.add(*s.add(2) as usize);
+
+            *d.add(3) = *lut_r.add(*s.add(6) as usize);
+            *d.add(4) = *lut_g.add(*s.add(7) as usize);
+            *d.add(5) = *lut_b.add(*s.add(8) as usize);
+
+            *d.add(6) = *lut_r.add(*s.add(12) as usize);
+            *d.add(7) = *lut_g.add(*s.add(13) as usize);
+            *d.add(8) = *lut_b.add(*s.add(14) as usize);
+
+            *d.add(9) = *lut_r.add(*s.add(18) as usize);
+            *d.add(10) = *lut_g.add(*s.add(19) as usize);
+            *d.add(11) = *lut_b.add(*s.add(20) as usize);
+
+            x += 4;
+        }
+        while x < dst_width {
+            let in_x = x * 6;
+            let d = d_row.add(x * 3);
+            let s = s_row.add(in_x);
+            *d = *lut_r.add(*s as usize);
+            *d.add(1) = *lut_g.add(*s.add(1) as usize);
+            *d.add(2) = *lut_b.add(*s.add(2) as usize);
+            x += 1;
+        }
+    }
+}
+
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn resize_nearest_rgb_neon(
@@ -498,7 +598,148 @@ unsafe fn resize_bilinear_down2_rgb_neon(
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn lut_lookup16(
+    v: std::arch::aarch64::uint8x16_t,
+    t0: std::arch::aarch64::uint8x16x4_t,
+    t1: std::arch::aarch64::uint8x16x4_t,
+    t2: std::arch::aarch64::uint8x16x4_t,
+    t3: std::arch::aarch64::uint8x16x4_t,
+) -> std::arch::aarch64::uint8x16_t {
+    use std::arch::aarch64::*;
+    let res0 = vqtbl4q_u8(t0, v);
+    let res1 = vqtbl4q_u8(t1, vsubq_u8(v, vdupq_n_u8(64)));
+    let res2 = vqtbl4q_u8(t2, vsubq_u8(v, vdupq_n_u8(128)));
+    let res3 = vqtbl4q_u8(t3, vsubq_u8(v, vdupq_n_u8(192)));
+    let mask1 = vcgeq_u8(v, vdupq_n_u8(64));
+    let mask2 = vcgeq_u8(v, vdupq_n_u8(128));
+    let mask3 = vcgeq_u8(v, vdupq_n_u8(192));
+    let mut result = vbslq_u8(mask1, res1, res0);
+    result = vbslq_u8(mask2, res2, result);
+    vbslq_u8(mask3, res3, result)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn resize_bilinear_down2_rgb_lut_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    src_width: usize,
+    _src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+    luts: &[[u8; 256]; 3],
+) {
+    let src_stride = src_width * 3;
+    let dst_stride = dst_width * 3;
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
+    let is_1c = luts[0] == luts[1] && luts[1] == luts[2];
+
+    let (r0, r1, r2, r3) = (
+        vld1q_u8_x4(luts[0].as_ptr()),
+        vld1q_u8_x4(luts[0].as_ptr().add(64)),
+        vld1q_u8_x4(luts[0].as_ptr().add(128)),
+        vld1q_u8_x4(luts[0].as_ptr().add(192)),
+    );
+
+    let (g0, g1, g2, g3) = if is_1c {
+        (r0, r1, r2, r3)
+    } else {
+        (
+            vld1q_u8_x4(luts[1].as_ptr()),
+            vld1q_u8_x4(luts[1].as_ptr().add(64)),
+            vld1q_u8_x4(luts[1].as_ptr().add(128)),
+            vld1q_u8_x4(luts[1].as_ptr().add(192)),
+        )
+    };
+
+    let (b0, b1, b2, b3) = if is_1c {
+        (r0, r1, r2, r3)
+    } else {
+        (
+            vld1q_u8_x4(luts[2].as_ptr()),
+            vld1q_u8_x4(luts[2].as_ptr().add(64)),
+            vld1q_u8_x4(luts[2].as_ptr().add(128)),
+            vld1q_u8_x4(luts[2].as_ptr().add(192)),
+        )
+    };
+
+    for y_new in 0..dst_height {
+        let row0 = src_ptr.add(2 * y_new * src_stride);
+        let row1 = src_ptr.add((2 * y_new + 1) * src_stride);
+        let dst_row = dst_ptr.add(y_new * dst_stride);
+
+        let mut x_new = 0;
+        let mut in_x = 0;
+
+        while x_new + 16 <= dst_width && in_x + 96 <= src_stride {
+            let r0_a = vld3q_u8(row0.add(in_x));
+            let r0_b = vld3q_u8(row0.add(in_x + 48));
+            let r1_a = vld3q_u8(row1.add(in_x));
+            let r1_b = vld3q_u8(row1.add(in_x + 48));
+
+            // Red channel
+            let r0_even_r = vuzp1q_u8(r0_a.0, r0_b.0);
+            let r0_odd_r = vuzp2q_u8(r0_a.0, r0_b.0);
+            let r1_even_r = vuzp1q_u8(r1_a.0, r1_b.0);
+            let r1_odd_r = vuzp2q_u8(r1_a.0, r1_b.0);
+            let top_r = vrhaddq_u8(r0_even_r, r0_odd_r);
+            let bot_r = vrhaddq_u8(r1_even_r, r1_odd_r);
+            let final_r = vrhaddq_u8(top_r, bot_r);
+            let lut_r = lut_lookup16(final_r, r0, r1, r2, r3);
+
+            // Green channel
+            let r0_even_g = vuzp1q_u8(r0_a.1, r0_b.1);
+            let r0_odd_g = vuzp2q_u8(r0_a.1, r0_b.1);
+            let r1_even_g = vuzp1q_u8(r1_a.1, r1_b.1);
+            let r1_odd_g = vuzp2q_u8(r1_a.1, r1_b.1);
+            let top_g = vrhaddq_u8(r0_even_g, r0_odd_g);
+            let bot_g = vrhaddq_u8(r1_even_g, r1_odd_g);
+            let final_g = vrhaddq_u8(top_g, bot_g);
+            let lut_g = lut_lookup16(final_g, g0, g1, g2, g3);
+
+            // Blue channel
+            let r0_even_b = vuzp1q_u8(r0_a.2, r0_b.2);
+            let r0_odd_b = vuzp2q_u8(r0_a.2, r0_b.2);
+            let r1_even_b = vuzp1q_u8(r1_a.2, r1_b.2);
+            let r1_odd_b = vuzp2q_u8(r1_a.2, r1_b.2);
+            let top_b = vrhaddq_u8(r0_even_b, r0_odd_b);
+            let bot_b = vrhaddq_u8(r1_even_b, r1_odd_b);
+            let final_b = vrhaddq_u8(top_b, bot_b);
+            let lut_b = lut_lookup16(final_b, b0, b1, b2, b3);
+
+            vst3q_u8(
+                dst_row.add(x_new * 3),
+                uint8x16x3_t(lut_r, lut_g, lut_b),
+            );
+
+            x_new += 16;
+            in_x += 96;
+        }
+
+        while x_new < dst_width {
+            let p00 = row0.add(in_x);
+            let p10 = if in_x + 3 < src_stride { row0.add(in_x + 3) } else { p00 };
+            let p01 = row1.add(in_x);
+            let p11 = if in_x + 3 < src_stride { row1.add(in_x + 3) } else { p01 };
+
+            for c in 0..3 {
+                let top = (*p00.add(c) as u32 + *p10.add(c) as u32 + 1) >> 1;
+                let bot = (*p01.add(c) as u32 + *p11.add(c) as u32 + 1) >> 1;
+                let raw_val = ((top + bot + 1) >> 1) as u8;
+                *dst_row.add(x_new * 3 + c) = luts[c][raw_val as usize];
+            }
+
+            x_new += 1;
+            in_x += 6;
+        }
+    }
+}
+
 /// Fast 2x downsample for Grayscale using single-cycle `vrhadd` NEON operations
+
 #[cfg(target_arch = "aarch64")]
 unsafe fn resize_bilinear_down2_gray_neon(
     src: &[u8],

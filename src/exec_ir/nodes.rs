@@ -7,26 +7,212 @@ use crate::exec_ir::optimizer::BlockStats;
 use crate::sampled_ir::SampledImageOp;
 use std::fmt;
 
-/// Fast-path kernel function pointer
-///
-/// Pre-bound function that executes a transform without type checks.
-/// This is the "zero-cost abstraction" path that avoids dynamic dispatch.
+///// Fast-path kernel function pointer (legacy trait object closure)
 pub type FastKernel = Box<dyn Fn(&mut FusableImage) -> Option<BarrierImage> + Send + Sync>;
+
+/// Concrete execution kernel without trait objects or dynamic dispatch
+#[derive(Debug, Clone)]
+pub enum KernelKind {
+    /// Fused LUT: applies 3-channel or 1-channel precomputed lookup tables
+    FusedLut {
+        luts_3c: Option<Box<[[u8; 256]; 3]>>,
+        lut_1c: [u8; 256],
+    },
+    /// Pure geometric D4 transform (Flips, Rot90, Transpose)
+    Geometric(crate::transforms::Orientation),
+    /// Resize fused with trailing LUTs
+    ResizeWithLut {
+        resize: crate::transforms::Resize,
+        luts_3c: Option<Box<[[u8; 256]; 3]>>,
+        lut_1c: [u8; 256],
+    },
+    /// Fused LUT followed by ToGray
+    LutToGray {
+        luts_3c: Box<[[u8; 256]; 3]>,
+    },
+    /// Equalize with trailing LUTs
+    EqualizeWithLut {
+        luts_3c: Option<Box<[[u8; 256]; 3]>>,
+        lut_1c: [u8; 256],
+    },
+    /// AutoContrast with trailing LUTs
+    AutoContrastWithLut {
+        cutoff: f32,
+        luts_3c: Option<Box<[[u8; 256]; 3]>>,
+        lut_1c: [u8; 256],
+    },
+    /// Fused Color Matrix
+    FusedMatrix(crate::transforms::FusedMatrix),
+    /// Single transform execution
+    Single(SampledImageOp),
+    /// Barrier transform
+    Barrier(SampledImageOp),
+}
+
+impl KernelKind {
+    /// Execute this kernel on an image using static enum dispatch
+    #[inline]
+    pub fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
+        match self {
+            KernelKind::FusedLut { luts_3c, lut_1c } => {
+                if let Some(ref luts) = luts_3c {
+                    if image.channels == 3 {
+                        crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(image, luts);
+                    } else {
+                        crate::transforms::runtime::lut::LutExecutor::apply(image, lut_1c);
+                    }
+                } else {
+                    crate::transforms::runtime::lut::LutExecutor::apply(image, lut_1c);
+                }
+                None
+            }
+            KernelKind::Geometric(orientation) => {
+                let k = crate::transforms::StructuralKernel::new(*orientation);
+                crate::core::Executable::execute(&k, image)
+            }
+            KernelKind::ResizeWithLut { resize, luts_3c, lut_1c } => {
+                Some(resize.apply_with_lut(image, luts_3c.as_deref(), lut_1c))
+            }
+            KernelKind::LutToGray { luts_3c } => {
+                crate::transforms::ToGray::apply_with_lut(image, luts_3c)
+            }
+            KernelKind::EqualizeWithLut { luts_3c, lut_1c } => {
+                if let Some(eq_luts) = crate::transforms::Equalize::build_luts_from_image(image) {
+                    if let Some(ref post_luts) = luts_3c {
+                        let mut composed = [[0u8; 256]; 3];
+                        for c in 0..3 {
+                            for i in 0..256 {
+                                composed[c][i] = post_luts[c][eq_luts[c][i] as usize];
+                            }
+                        }
+                        if image.channels == 3 {
+                            crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(image, &composed);
+                        } else {
+                            let mut composed_1c = [0u8; 256];
+                            for i in 0..256 {
+                                composed_1c[i] = lut_1c[eq_luts[0][i] as usize];
+                            }
+                            crate::transforms::runtime::lut::LutExecutor::apply(image, &composed_1c);
+                        }
+                    } else {
+                        let mut composed = [[0u8; 256]; 3];
+                        for c in 0..3 {
+                            for i in 0..256 {
+                                composed[c][i] = lut_1c[eq_luts[c][i] as usize];
+                            }
+                        }
+                        if image.channels == 3 {
+                            crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(image, &composed);
+                        } else {
+                            let mut composed_1c = [0u8; 256];
+                            for i in 0..256 {
+                                composed_1c[i] = lut_1c[eq_luts[0][i] as usize];
+                            }
+                            crate::transforms::runtime::lut::LutExecutor::apply(image, &composed_1c);
+                        }
+                    }
+                } else {
+                    let _ = crate::core::Executable::execute(&crate::transforms::Equalize::new(), image);
+                    if let Some(ref luts) = luts_3c {
+                        if image.channels == 3 {
+                            crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(image, luts);
+                        } else {
+                            crate::transforms::runtime::lut::LutExecutor::apply(image, lut_1c);
+                        }
+                    } else {
+                        crate::transforms::runtime::lut::LutExecutor::apply(image, lut_1c);
+                    }
+                }
+                None
+            }
+            KernelKind::AutoContrastWithLut { cutoff, luts_3c, lut_1c } => {
+                let auto_lut = crate::transforms::AutoContrast::new(*cutoff).build_lut_from_image(image);
+                if let Some(ref post_luts) = luts_3c {
+                    let mut composed = [[0u8; 256]; 3];
+                    for c in 0..3 {
+                        for i in 0..256 {
+                            composed[c][i] = post_luts[c][auto_lut[i] as usize];
+                        }
+                    }
+                    if image.channels == 3 {
+                        crate::transforms::runtime::lut::LutExecutor::apply_rgb_luts(image, &composed);
+                    } else {
+                        let mut composed_1c = [0u8; 256];
+                        for i in 0..256 {
+                            composed_1c[i] = lut_1c[auto_lut[i] as usize];
+                        }
+                        crate::transforms::runtime::lut::LutExecutor::apply(image, &composed_1c);
+                    }
+                } else {
+                    let mut composed = [0u8; 256];
+                    for i in 0..256 {
+                        composed[i] = lut_1c[auto_lut[i] as usize];
+                    }
+                    crate::transforms::runtime::lut::LutExecutor::apply(image, &composed);
+                }
+                None
+            }
+            KernelKind::FusedMatrix(matrix) => {
+                if image.channels == 3 {
+                    crate::transforms::runtime::matrix::MatrixExecutor::apply(image, &matrix.matrix);
+                }
+                None
+            }
+            KernelKind::Single(op) | KernelKind::Barrier(op) => {
+                crate::core::Executable::execute(op, image)
+            }
+        }
+    }
+
+    /// Construct a KernelKind from a slice of fused ops
+    pub fn from_fused_ops(ops: &[SampledImageOp]) -> Self {
+        if ops.is_empty() {
+            return KernelKind::Single(SampledImageOp::Invert);
+        }
+        if ops.len() == 1 {
+            return KernelKind::Single(ops[0].clone());
+        }
+        if ops.iter().all(|t| crate::exec_ir::optimizer::is_geometric_transform_sampled(t)) {
+            let mut orientation = crate::transforms::Orientation::Identity;
+            for op in ops {
+                match op {
+                    SampledImageOp::HorizontalFlip => orientation = orientation.compose(crate::transforms::Orientation::FlipH),
+                    SampledImageOp::VerticalFlip => orientation = orientation.compose(crate::transforms::Orientation::FlipV),
+                    SampledImageOp::Transpose => orientation = orientation.compose(crate::transforms::Orientation::Transpose),
+                    SampledImageOp::Rotate { angle } => {
+                        let a = match angle {
+                            crate::sampled_ir::ops::RotateAngle::Rotate90 => crate::transforms::Orientation::Rot90,
+                            crate::sampled_ir::ops::RotateAngle::Rotate180 => crate::transforms::Orientation::Rot180,
+                            crate::sampled_ir::ops::RotateAngle::Rotate270 => crate::transforms::Orientation::Rot270,
+                        };
+                        orientation = orientation.compose(a);
+                    }
+                    _ => {}
+                }
+            }
+            return KernelKind::Geometric(orientation);
+        }
+        if ops.iter().all(|t| t.is_lut_op()) {
+            let fused_lut = crate::transforms::FusedLut::from_sampled_ops(ops);
+            return KernelKind::FusedLut {
+                luts_3c: fused_lut.luts_3c.map(Box::new),
+                lut_1c: fused_lut.lut,
+            };
+        }
+        KernelKind::Single(ops[0].clone())
+    }
+}
 
 /// Execution IR node kind
 ///
 /// The internal enum representing what kind of node this is.
 /// NO RTTI - uses SampledImageOp enum directly.
+#[derive(Clone)]
 pub enum ExecNodeKind {
     /// A fused block of ops that execute as a single pass
-    ///
-    /// All ops in this block are InPlace + Preserve,
-    /// so they can be safely fused into one loop over pixels.
     Fused(Vec<SampledImageOp>),
 
     /// A barrier that breaks fusion
-    ///
-    /// Barriers are transforms that change shape (Resize, Crop, Pad)
     Barrier(SampledImageOp),
 }
 
@@ -42,42 +228,74 @@ impl fmt::Debug for ExecNodeKind {
 /// Execution IR node
 ///
 /// Represents either a fused block of ops or a barrier.
-/// This is the output of the optimizer.
-///
-/// NO RTTI - uses SampledImageOp enum with match dispatch.
+/// Dispatches via fast enum KernelKind without dynamic trait objects.
 pub struct ExecNode {
     /// The kind of execution node (fused or barrier)
     pub kind: ExecNodeKind,
 
-    /// Pre-bound fast-path kernel (set during optimization)
-    ///
-    /// When Some: executes directly without type checks
-    /// When None: uses match dispatch on SampledImageOp (still no RTTI!)
+    /// Legacy fast-path kernel (when set, takes precedence)
     pub kernel: Option<FastKernel>,
+
+    /// Zero-cost concrete kernel kind
+    pub kernel_kind: Option<KernelKind>,
 }
 
 impl ExecNode {
     /// Create a new Fused node
     pub fn fused(ops: Vec<SampledImageOp>) -> Self {
+        let kernel_kind = KernelKind::from_fused_ops(&ops);
         Self {
             kind: ExecNodeKind::Fused(ops),
             kernel: None,
+            kernel_kind: Some(kernel_kind),
         }
     }
 
     /// Create a new Barrier node
     pub fn barrier(op: SampledImageOp) -> Self {
+        let kernel_kind = KernelKind::Barrier(op.clone());
         Self {
             kind: ExecNodeKind::Barrier(op),
             kernel: None,
+            kernel_kind: Some(kernel_kind),
         }
     }
 
-    /// Create a node with a pre-bound fast-path kernel
+    /// Create a node with a pre-bound legacy fast-path kernel
     pub fn with_kernel(kind: ExecNodeKind, kernel: FastKernel) -> Self {
         Self {
             kind,
             kernel: Some(kernel),
+            kernel_kind: None,
+        }
+    }
+
+    /// Create a node with a concrete zero-allocation kernel
+    pub fn with_kernel_kind(kind: ExecNodeKind, kernel_kind: KernelKind) -> Self {
+        Self {
+            kind,
+            kernel: None,
+            kernel_kind: Some(kernel_kind),
+        }
+    }
+
+    /// Execute this node on an image
+    #[inline]
+    pub fn execute(&self, image: &mut FusableImage) -> Option<BarrierImage> {
+        if let Some(ref k) = self.kernel_kind {
+            return k.execute(image);
+        }
+        if let Some(ref k) = self.kernel {
+            return k(image);
+        }
+        match &self.kind {
+            ExecNodeKind::Fused(transforms) if transforms.len() == 1 => {
+                crate::core::Executable::execute(&transforms[0], image)
+            }
+            ExecNodeKind::Barrier(op) => {
+                crate::core::Executable::execute(op, image)
+            }
+            _ => None,
         }
     }
 
@@ -309,12 +527,25 @@ impl ExecPlan {
         if let Some(first_node) = self.nodes.first() {
             match &first_node.kind {
                 ExecNodeKind::Barrier(_) => false,
-                ExecNodeKind::Fused(ops) => !ops.is_empty(),
+                ExecNodeKind::Fused(ops) => {
+                    if let Some(first_op) = ops.first() {
+                        if matches!(first_op.access_pattern(), crate::core::AccessPattern::OutOfPlace) {
+                            return false;
+                        }
+                    }
+                    if let Some(last_op) = ops.last() {
+                        if matches!(last_op, SampledImageOp::ToGray) {
+                            return false;
+                        }
+                    }
+                    !ops.is_empty()
+                }
             }
         } else {
             false
         }
     }
+
 
     /// Print the fusion statistics (if available)
     pub fn print_stats(&self) {
