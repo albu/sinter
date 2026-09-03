@@ -11,7 +11,12 @@ from sinter import (
     OneOf,
     VerticalFlip,
 )
-import torch
+
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 
 
 def test_identity_transform():
@@ -145,9 +150,10 @@ def test_4d_batch_auto_dispatch():
     np.testing.assert_array_equal(res_apply[0, :, 16:, :], 255)
 
     # 4D PyTorch tensor (B, C, H, W)
-    batch_torch = torch.zeros((4, 3, 32, 32), dtype=torch.uint8)
-    batch_torch[:, :, :, :16] = 255
-    res_torch = p.apply(batch_torch)
-    assert isinstance(res_torch, torch.Tensor)
-    assert res_torch.shape == (4, 3, 32, 32)
-    assert torch.all(res_torch[0, :, :, 16:] == 255)
+    if HAS_TORCH:
+        batch_torch = torch.zeros((4, 3, 32, 32), dtype=torch.uint8)
+        batch_torch[:, :, :, :16] = 255
+        res_torch = p.apply(batch_torch)
+        assert isinstance(res_torch, torch.Tensor)
+        assert res_torch.shape == (4, 3, 32, 32)
+        assert torch.all(res_torch[0, :, :, 16:] == 255)
