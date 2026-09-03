@@ -636,8 +636,10 @@ impl SampledImageOp {
                 | SampledImageOp::Invert
                 | SampledImageOp::Posterize { .. }
                 | SampledImageOp::Solarize { .. }
+                | SampledImageOp::RGBShift { .. }
         )
     }
+
 
     /// Check if this is a data-dependent LUT transform
     ///
@@ -648,6 +650,94 @@ impl SampledImageOp {
             self,
             SampledImageOp::Equalize | SampledImageOp::AutoContrast { .. }
         )
+    }
+
+    /// Build a 1-channel lookup table for this op if it is a pointwise LUT op
+    pub fn build_lut(&self) -> Option<[u8; 256]> {
+        match self {
+            SampledImageOp::Brightness { delta } => {
+                let mut lut = [0u8; 256];
+                for i in 0..256 {
+                    let x = i as f32;
+                    let y = x + delta;
+                    lut[i] = y.clamp(0.0, 255.0) as u8;
+                }
+                Some(lut)
+            }
+            SampledImageOp::Contrast { factor } => {
+                let mut lut = [0u8; 256];
+                let midpoint = 128.0;
+                for i in 0..256 {
+                    let x = i as f32;
+                    let y = (x - midpoint) * factor + midpoint;
+                    lut[i] = y.clamp(0.0, 255.0) as u8;
+                }
+                Some(lut)
+            }
+            SampledImageOp::Gamma { gamma } => {
+                let mut lut = [0u8; 256];
+                let g = *gamma;
+                for i in 0u8..=255 {
+                    let normalized = i as f32 / 255.0;
+                    let corrected = normalized.powf(g);
+                    lut[i as usize] = (corrected * 255.0).clamp(0.0, 255.0) as u8;
+                }
+                Some(lut)
+            }
+            SampledImageOp::Invert => {
+                let mut lut = [0u8; 256];
+                for i in 0..256 {
+                    lut[i] = 255 - i as u8;
+                }
+                Some(lut)
+            }
+            SampledImageOp::Posterize { bits } => {
+                let mut lut = [0u8; 256];
+                let bits_to_discard = 8 - bits;
+                for i in 0u8..=255 {
+                    lut[i as usize] = (i >> bits_to_discard) << bits_to_discard;
+                }
+                Some(lut)
+            }
+            SampledImageOp::Solarize { threshold } => {
+                let mut lut = [0u8; 256];
+                for i in 0u8..=255 {
+                    lut[i as usize] = if i >= *threshold { 255 - i } else { i };
+                }
+                Some(lut)
+            }
+            SampledImageOp::RGBShift { r_shift, g_shift, b_shift } => {
+                let avg = (*r_shift as f32 + *g_shift as f32 + *b_shift as f32) / 3.0;
+                let s = avg.round() as i16;
+                let mut lut = [0u8; 256];
+                for i in 0..256 {
+                    lut[i] = (i as i16 + s).clamp(0, 255) as u8;
+                }
+                Some(lut)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a 3-channel lookup table for 3-channel-aware LUT ops (like RGBShift)
+    pub fn build_lut_3c(&self) -> Option<[[u8; 256]; 3]> {
+        match self {
+            SampledImageOp::RGBShift { r_shift, g_shift, b_shift } => {
+                let r_s = *r_shift as i16;
+                let g_s = *g_shift as i16;
+                let b_s = *b_shift as i16;
+                let mut r = [0u8; 256];
+                let mut g = [0u8; 256];
+                let mut b = [0u8; 256];
+                for i in 0..256 {
+                    r[i] = (i as i16 + r_s).clamp(0, 255) as u8;
+                    g[i] = (i as i16 + g_s).clamp(0, 255) as u8;
+                    b[i] = (i as i16 + b_s).clamp(0, 255) as u8;
+                }
+                Some([r, g, b])
+            }
+            _ => None,
+        }
     }
 }
 

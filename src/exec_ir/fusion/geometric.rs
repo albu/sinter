@@ -96,22 +96,12 @@ pub(crate) fn try_geometric_only_fusion(fused: &mut Vec<SampledImageOp>) -> Fusi
         return FusionResult::Success(vec![]);
     }
 
-    // Step 4: Create StructuralKernel (pure geometric, no LUT)
-    let structural_kernel = StructuralKernel::new(composed_orientation);
-
-    // Bind fast-path kernel - use Executable trait directly
-    let orientation_for_kernel = composed_orientation;
-    let kernel: FastKernel = Box::new(
-        move |image: &mut FusableImage| -> Option<crate::core::BarrierImage> {
-            let kernel = StructuralKernel::new(orientation_for_kernel);
-            Executable::execute(&kernel, image)
-        },
-    );
-
-    // Store the ORIGINAL transforms in the ExecNode for counting
+    // Step 4: Create node with concrete KernelKind::Geometric
     let original_transforms = std::mem::take(fused);
-
-    let node = ExecNode::with_kernel(ExecNodeKind::Fused(original_transforms), kernel);
+    let node = ExecNode::with_kernel_kind(
+        ExecNodeKind::Fused(original_transforms),
+        crate::exec_ir::nodes::KernelKind::Geometric(composed_orientation),
+    );
 
     FusionResult::Success(vec![node])
 }

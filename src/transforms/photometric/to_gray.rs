@@ -29,7 +29,45 @@ impl ToGray {
     pub fn new() -> Self {
         Self
     }
+
+    /// Apply 3-channel (or 1-channel broadcasted) LUT and convert to grayscale in a single memory pass
+    pub fn apply_with_lut(image: &mut FusableImage, luts: &[[u8; 256]; 3]) -> Option<BarrierImage> {
+        if image.channels == 1 {
+            // Image is already grayscale; apply the LUT in-place
+            crate::transforms::runtime::lut::LutExecutor::apply(image, &luts[0]);
+            return None;
+        }
+        if image.channels != 3 {
+            return None;
+        }
+
+        let pixel_count = image.width * image.height;
+        let mut gray_data = vec![0u8; pixel_count];
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            neon::lut_to_gray_neon(&image.data, &mut gray_data, pixel_count, luts);
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for i in 0..pixel_count {
+                let r = luts[0][image.data[i * 3] as usize] as u32;
+                let g = luts[1][image.data[i * 3 + 1] as usize] as u32;
+                let b = luts[2][image.data[i * 3 + 2] as usize] as u32;
+                gray_data[i] = ((77 * r + 150 * g + 29 * b + 128) >> 8) as u8;
+            }
+        }
+
+        Some(BarrierImage::from_vec(
+            gray_data,
+            image.width,
+            image.height,
+            1,
+        ))
+    }
 }
+
 
 impl Default for ToGray {
     fn default() -> Self {

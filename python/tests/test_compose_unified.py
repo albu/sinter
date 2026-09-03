@@ -245,5 +245,58 @@ class TestComposeUnified:
         max_diff = int(np.abs(s1.astype(int) - seq.astype(int)).max())
         assert max_diff <= 32, f"long pipeline divergence exceeded bound: {max_diff}"
 
+    def test_crop_hoisting_pointwise_equivalence(self):
+        """Test that compiler hoists Crop before pointwise photometric ops bit-exactly."""
+        from sinter import Crop
+
+        rng = np.random.default_rng(42)
+        img = rng.integers(0, 256, (200, 200, 3), dtype=np.uint8)
+
+        # Pipeline with photometric ops followed by Crop
+        pipe_color_then_crop = Compose([
+            Brightness(delta=25),
+            Contrast(factor=1.3),
+            Crop(x=20, y=30, width=80, height=80),
+        ])
+
+        # Pipeline with Crop explicitly first
+        pipe_crop_then_color = Compose([
+            Crop(x=20, y=30, width=80, height=80),
+            Brightness(delta=25),
+            Contrast(factor=1.3),
+        ])
+
+        out_a = pipe_color_then_crop.apply(img)
+        out_b = pipe_crop_then_color.apply(img)
+
+        # Bit-exact equivalence
+        np.testing.assert_array_equal(out_a, out_b)
+
+        # Check execution plan: Crop is hoisted to Node 1!
+        plan_str = pipe_color_then_crop.explain()
+        assert "2 execution nodes" in plan_str
+        assert "Node 1: Barrier" in plan_str
+        assert "Node 2: Fused(2 ops)" in plan_str
+
+    def test_random_crop_hoisting_multimodal(self):
+        """Test that RandomCrop hoisting preserves multimodal labels (bboxes, mask)."""
+        from sinter import RandomCrop
+
+        rng = np.random.default_rng(99)
+        img = rng.integers(0, 256, (300, 300, 3), dtype=np.uint8)
+        mask = rng.integers(0, 5, (300, 300), dtype=np.uint8)
+        bboxes = np.array([[50.0, 50.0, 60.0, 60.0]], dtype=np.float32)
+
+        pipe = Compose([
+            Brightness(delta=20),
+            Contrast(factor=1.1),
+            RandomCrop(width=150, height=150),
+        ])
+
+        res = pipe(image=img, mask=mask, bboxes=bboxes, seed=42)
+        assert res["image"].shape == (150, 150, 3)
+        assert res["mask"].shape == (150, 150)
+        assert len(res["bboxes"]) <= 1  # BBox may be cropped or kept
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

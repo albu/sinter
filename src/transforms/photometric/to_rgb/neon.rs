@@ -12,6 +12,21 @@ pub unsafe fn to_rgb_neon(src: &[u8], dst: &mut [u8], pixel_count: usize) {
 
     let mut i = 0;
 
+    // Process 64 pixels at a time (192 bytes output)
+    while i + 64 <= pixel_count {
+        let g0 = vld1q_u8(src.as_ptr().add(i));
+        let g1 = vld1q_u8(src.as_ptr().add(i + 16));
+        let g2 = vld1q_u8(src.as_ptr().add(i + 32));
+        let g3 = vld1q_u8(src.as_ptr().add(i + 48));
+
+        vst3q_u8(dst.as_mut_ptr().add(i * 3), uint8x16x3_t(g0, g0, g0));
+        vst3q_u8(dst.as_mut_ptr().add((i + 16) * 3), uint8x16x3_t(g1, g1, g1));
+        vst3q_u8(dst.as_mut_ptr().add((i + 32) * 3), uint8x16x3_t(g2, g2, g2));
+        vst3q_u8(dst.as_mut_ptr().add((i + 48) * 3), uint8x16x3_t(g3, g3, g3));
+
+        i += 64;
+    }
+
     // Process 16 pixels at a time (48 bytes)
     while i + 16 <= pixel_count {
         let gray = vld1q_u8(src.as_ptr().add(i));

@@ -170,16 +170,16 @@ pub unsafe fn convolve_1d_vertical_neon_5(image: &mut FusableImage, kernel: &[i3
                 let row2 = data.as_ptr().add(((y + 2) * width + x_start) * 3) as *const u8;
 
                 // Load 8 RGB pixels from each row
-                let p_2 = vld3q_u8(row_2);
-                let p_1 = vld3q_u8(row_1);
-                let p0 = vld3q_u8(row0);
-                let p1 = vld3q_u8(row1);
-                let p2 = vld3q_u8(row2);
+                let p_2 = vld3_u8(row_2);
+                let p_1 = vld3_u8(row_1);
+                let p0 = vld3_u8(row0);
+                let p1 = vld3_u8(row1);
+                let p2 = vld3_u8(row2);
 
                 // Apply [1 4 6 4 1] kernel vertically to all 8 pixels
-                let r_blur = blur5_scalar_to_u8(vget_low_u8(p_2.0), vget_low_u8(p_1.0), vget_low_u8(p0.0), vget_low_u8(p1.0), vget_low_u8(p2.0));
-                let g_blur = blur5_scalar_to_u8(vget_low_u8(p_2.1), vget_low_u8(p_1.1), vget_low_u8(p0.1), vget_low_u8(p1.1), vget_low_u8(p2.1));
-                let b_blur = blur5_scalar_to_u8(vget_low_u8(p_2.2), vget_low_u8(p_1.2), vget_low_u8(p0.2), vget_low_u8(p1.2), vget_low_u8(p2.2));
+                let r_blur = blur5_scalar_to_u8(p_2.0, p_1.0, p0.0, p1.0, p2.0);
+                let g_blur = blur5_scalar_to_u8(p_2.1, p_1.1, p0.1, p1.1, p2.1);
+                let b_blur = blur5_scalar_to_u8(p_2.2, p_1.2, p0.2, p1.2, p2.2);
 
                 // Store results
                 let out_ptr = output.as_mut_ptr().add((y * width + x_start) * 3) as *mut u8;
@@ -490,17 +490,23 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
     let width = image.width;
     let height = image.height;
     let data = &mut image.data;
-    let total_bytes = data.len();
-    let mut temp = Vec::<u8>::with_capacity(total_bytes);
-    unsafe { temp.set_len(total_bytes); }
-    let radius = 2;
+    const TAPS: usize = 5;
+    const RADIUS: usize = 2;
     const TILE: usize = 16;
+    let row_bytes = width;
+    let mut ring = vec![0u8; TAPS * row_bytes];
 
-    // HORIZONTAL PASS
-    for y in 0..height {
-        let row_offset = y * width;
+    unsafe fn horizontal_gray(
+        data: &[u8],
+        sy: usize,
+        width: usize,
+        ring: &mut [u8],
+        slot: usize,
+    ) {
+        let row_offset = sy * width;
         let in_ptr = data.as_ptr().add(row_offset);
-        let out_ptr = temp.as_mut_ptr().add(row_offset);
+        let out_ptr = ring.as_mut_ptr().add(slot * width);
+        let radius = 2;
 
         // Left edge (x = 0, 1)
         for x in 0..width.min(radius) {
@@ -550,20 +556,20 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
         }
     }
 
-    // VERTICAL PASS
-    let row_chunks = width / 16;
-    for y in 0..height {
-        let y_m2 = (y as i32 - 2).clamp(0, height as i32 - 1) as usize;
-        let y_m1 = (y as i32 - 1).clamp(0, height as i32 - 1) as usize;
-        let y_p1 = (y as i32 + 1).clamp(0, height as i32 - 1) as usize;
-        let y_p2 = (y as i32 + 2).clamp(0, height as i32 - 1) as usize;
-
-        let ptr_m2 = temp.as_ptr().add(y_m2 * width);
-        let ptr_m1 = temp.as_ptr().add(y_m1 * width);
-        let ptr_0  = temp.as_ptr().add(y * width);
-        let ptr_p1 = temp.as_ptr().add(y_p1 * width);
-        let ptr_p2 = temp.as_ptr().add(y_p2 * width);
-        let out_ptr = data.as_mut_ptr().add(y * width);
+    unsafe fn vertical_gray(
+        ring: &[u8],
+        slots: &[usize; 5],
+        width: usize,
+        data: &mut [u8],
+        oy: usize,
+    ) {
+        let row_chunks = width / 16;
+        let out_ptr = data.as_mut_ptr().add(oy * width);
+        let ptr_m2 = ring.as_ptr().add(slots[0] * width);
+        let ptr_m1 = ring.as_ptr().add(slots[1] * width);
+        let ptr_0  = ring.as_ptr().add(slots[2] * width);
+        let ptr_p1 = ring.as_ptr().add(slots[3] * width);
+        let ptr_p2 = ring.as_ptr().add(slots[4] * width);
 
         for chunk in 0..row_chunks {
             let offset = chunk * 16;
@@ -584,6 +590,23 @@ unsafe fn convolve_separable_gray_neon_5(image: &mut FusableImage) {
                 + *ptr_p1.add(x) as u32 * 4
                 + *ptr_p2.add(x) as u32;
             *out_ptr.add(x) = (sum >> 4) as u8;
+        }
+    }
+
+    let clamp_row = |r: i64| r.clamp(0, height as i64 - 1) as usize;
+    for y in 0..=(height - 1 + RADIUS) {
+        let sy = y.min(height - 1);
+        horizontal_gray(data, sy, width, &mut ring, y % TAPS);
+        if y >= RADIUS {
+            let oy = y - RADIUS;
+            let slots: [usize; 5] = [
+                clamp_row(oy as i64 - 2) % TAPS,
+                clamp_row(oy as i64 - 1) % TAPS,
+                clamp_row(oy as i64) % TAPS,
+                clamp_row(oy as i64 + 1) % TAPS,
+                clamp_row(oy as i64 + 2) % TAPS,
+            ];
+            vertical_gray(&ring, &slots, width, data, oy);
         }
     }
 }

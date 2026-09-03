@@ -16,7 +16,7 @@ mod tests;
 
 // Re-export for convenience
 pub use geometric::{
-    Affine, AffineParams, Crop, HorizontalFlip, Orientation, Pad, PadMode, Resize, Rotate,
+    Affine, AffineParams, AnyRes, Crop, HorizontalFlip, Orientation, Pad, PadMode, Resize, Rotate,
     RotateAngle, StructuralKernel, Transpose, VerticalFlip,
 };
 pub use kernel::{

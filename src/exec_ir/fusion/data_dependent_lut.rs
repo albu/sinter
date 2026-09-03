@@ -58,48 +58,31 @@ pub(crate) fn try_data_dependent_lut_fusion(fused: &mut Vec<SampledImageOp>) -> 
 
     // Step 4: Separate the data-dependent op from subsequent LUT ops
     let data_dependent_op = &lut_group[0];
-    let subsequent_lut_ops: Vec<Box<dyn LutOp>> = lut_group[1..]
-        .iter()
-        .filter_map(|t| try_as_lut_op_sampled(t))
-        .collect();
+    // Step 4: Fuse the subsequent LUT ops directly from SampledImageOp
+    let fused_lut = FusedLut::from_sampled_ops(&lut_group[1..]);
+    let luts_3c = fused_lut.luts_3c;
+    let lut_1c = fused_lut.lut;
 
-    if subsequent_lut_ops.is_empty() {
-        // Should not happen, but handle gracefully
-        return FusionResult::NotApplicable;
-    }
-
-    // Step 5: Fuse the subsequent LUT ops
-    let fused_lut = FusedLut::from_ops(&subsequent_lut_ops);
-    let lut = fused_lut.lut;
-
-    // Step 6: Create kernel based on the data-dependent op type
-    let kernel: FastKernel = match data_dependent_op {
-        SampledImageOp::Equalize => {
-            Box::new(move |image: &mut FusableImage| -> Option<BarrierImage> {
-                let _ = Executable::execute(&Equalize::new(), image);
-                LutExecutor::apply(image, &lut);
-                None
-            })
-        }
+    // Step 5: Create node with concrete KernelKind
+    let kernel_kind = match data_dependent_op {
+        SampledImageOp::Equalize => crate::exec_ir::nodes::KernelKind::EqualizeWithLut {
+            luts_3c: luts_3c.map(Box::new),
+            lut_1c,
+        },
         SampledImageOp::AutoContrast { cutoff_low, .. } => {
-            // SampledImageOp has cutoff_low/cutoff_high but AutoContrast only uses cutoff
-            let cutoff = *cutoff_low;
-            Box::new(move |image: &mut FusableImage| -> Option<BarrierImage> {
-                let _ = Executable::execute(&AutoContrast::new(cutoff), image);
-                LutExecutor::apply(image, &lut);
-                None
-            })
+            crate::exec_ir::nodes::KernelKind::AutoContrastWithLut {
+                cutoff: *cutoff_low,
+                luts_3c: luts_3c.map(Box::new),
+                lut_1c,
+            }
         }
-        _ => {
-            // Should not happen, but handle gracefully
-            Box::new(move |image: &mut FusableImage| -> Option<BarrierImage> {
-                LutExecutor::apply(image, &lut);
-                None
-            })
-        }
+        _ => crate::exec_ir::nodes::KernelKind::FusedLut {
+            luts_3c: luts_3c.map(Box::new),
+            lut_1c,
+        },
     };
 
-    let node = ExecNode::with_kernel(ExecNodeKind::Fused(lut_group), kernel);
+    let node = ExecNode::with_kernel_kind(ExecNodeKind::Fused(lut_group), kernel_kind);
 
     FusionResult::Success(vec![node])
 }

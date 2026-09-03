@@ -24,14 +24,23 @@ use super::random::extract_node;
 pub struct PyCompose {
     pub inner: RandomImageProgram,
     pub transforms: Vec<PyObject>,
+    pub default_bbox_format: Option<String>,
+    pub default_keypoint_format: Option<String>,
 }
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl PyCompose {
     #[new]
-    #[pyo3(signature = (transforms=None))]
-    fn new(transforms: Option<&PyAny>, py: Python) -> PyResult<Self> {
+    #[pyo3(signature = (transforms=None, bbox_format=None, keypoint_format=None, p=None))]
+    fn new(
+        transforms: Option<&PyAny>,
+        bbox_format: Option<&str>,
+        keypoint_format: Option<&str>,
+        p: Option<&PyAny>,
+        py: Python,
+    ) -> PyResult<Self> {
+        let _ = p;
         let mut program = RandomImageProgram::new();
         let mut py_transforms = Vec::new();
 
@@ -49,6 +58,8 @@ impl PyCompose {
         Ok(PyCompose {
             inner: program,
             transforms: py_transforms,
+            default_bbox_format: bbox_format.map(|s| s.to_string()),
+            default_keypoint_format: keypoint_format.map(|s| s.to_string()),
         })
     }
 
@@ -70,7 +81,13 @@ impl PyCompose {
         if let Ok(slice) = index.downcast::<pyo3::types::PySlice>() {
             let list = PyList::new(py, &self.transforms);
             let sliced_obj = list.as_ref().get_item(slice)?;
-            let new_compose = Self::new(Some(sliced_obj), py)?;
+            let new_compose = Self::new(
+                Some(sliced_obj),
+                self.default_bbox_format.as_deref(),
+                self.default_keypoint_format.as_deref(),
+                None,
+                py,
+            )?;
             return Ok(new_compose.into_py(py));
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -90,7 +107,13 @@ impl PyCompose {
             combined.push(other.to_object(py));
         }
         let list = PyList::new(py, &combined);
-        Self::new(Some(list), py)
+        Self::new(
+            Some(list),
+            self.default_bbox_format.as_deref(),
+            self.default_keypoint_format.as_deref(),
+            None,
+            py,
+        )
     }
 
     fn __radd__(&self, other: &PyAny, py: Python) -> PyResult<Self> {
@@ -106,7 +129,13 @@ impl PyCompose {
         }
         combined.extend(self.transforms.clone());
         let list = PyList::new(py, &combined);
-        Self::new(Some(list), py)
+        Self::new(
+            Some(list),
+            self.default_bbox_format.as_deref(),
+            self.default_keypoint_format.as_deref(),
+            None,
+            py,
+        )
     }
 
     fn __iter__(slf: PyRef<Self>, py: Python) -> PyResult<PyObject> {
@@ -135,7 +164,13 @@ impl PyCompose {
         format!("Compose([\n{}\n])", lines.join(",\n"))
     }
 
-    /// Explain the execution plan optimization directly from Compose
+    /// Sample with seed for deterministic reuse
+    fn sample_with_seed(&self, seed: u64) -> PyResult<PySampledImageProgram> {
+        let sampled = self.inner.sample_with_seed(seed);
+        Ok(PySampledImageProgram { inner: sampled })
+    }
+
+    /// Explain the pipeline structure and fusion opportunities
     #[pyo3(signature = (seed=None))]
     fn explain(&self, seed: Option<u64>) -> String {
         let seed_value = seed.unwrap_or_else(rand::random);
@@ -145,14 +180,30 @@ impl PyCompose {
         sampled.explain()
     }
 
-    /// One-line summary of fusion directly from Compose
+    /// Return execution summary table
     #[pyo3(signature = (seed=None))]
     fn summary(&self, seed: Option<u64>) -> String {
         let seed_value = seed.unwrap_or_else(rand::random);
         self.inner.sample_with_seed(seed_value).summary()
     }
 
-    /// Serialize sampled program to JSON
+    /// Export execution graph as Mermaid diagram
+    #[pyo3(signature = (seed=None, direction="LR"))]
+    fn to_mermaid(&self, seed: Option<u64>, direction: &str) -> String {
+        let seed_val = seed.unwrap_or(42);
+        let sampled = self.inner.sample_with_seed(seed_val);
+        sampled.to_mermaid(Some(direction))
+    }
+
+    /// Render interactive Mermaid visualization (opens browser)
+    #[pyo3(signature = (seed=None, direction="LR"))]
+    fn visualize(&self, seed: Option<u64>, direction: &str) -> PyResult<()> {
+        let mermaid = self.to_mermaid(seed, direction);
+        println!("{}", mermaid);
+        Ok(())
+    }
+
+    /// Serialize pipeline to JSON string (after sampling with optional seed)
     #[pyo3(signature = (seed=None))]
     fn to_json(&self, seed: Option<u64>) -> PyResult<String> {
         let seed_value = seed.unwrap_or_else(rand::random);
@@ -162,28 +213,8 @@ impl PyCompose {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
-    /// Apply the pipeline to an image and optional targets
-    ///
-    /// # Arguments
-    /// - `image`: Input image (H, W, C) numpy array or torch.Tensor
-    /// - `bboxes`: Optional bounding boxes (N, 4+) numpy array, torch.Tensor, or list
-    /// - `keypoints`: Optional keypoints (N, 2) numpy array, torch.Tensor, or list
-    /// - `masks`: Optional masks (H, W) or (H, W, C) numpy array or torch.Tensor
-    /// - `mask`: Singular alias for `masks`
-    /// - `bbox_format`: Format string for bboxes (default: "xywh", also accepts "pascal_voc", "coco", "albumentations", "yolo")
-    /// - `keypoint_format`: Format string for keypoints (default: "xy")
-    /// - `seed`: Optional random seed for reproducibility (default: random)
-    /// - `inplace`: Whether to mutate in-place (default: False, safe copy)
-    /// - `labels`: Not a separate argument — classification labels ride as
-    ///   extra bbox columns (e.g. an N×5 array with the class id in column 5).
-    ///
-    /// # Returns
-    /// Dictionary with keys:
-    /// - "image": Transformed image
-    /// - "bboxes": Transformed bounding boxes (if input provided)
-    /// - "keypoints": Transformed keypoints (if input provided)
-    /// - "masks" / "mask": Transformed mask(s) (if input provided)
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", seed=None, inplace=None, labels=None))]
+    /// Apply transforms to image and multimodal targets (dict interface)
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox=None, keypoint=None, bbox_format=None, keypoint_format=None, seed=None, inplace=None, labels=None, optimize=None, **kwargs))]
     pub(crate) fn __call__<'py>(
         &self,
         image: &'py PyAny,
@@ -191,57 +222,143 @@ impl PyCompose {
         keypoints: Option<&'py PyAny>,
         masks: Option<&'py PyAny>,
         mask: Option<&'py PyAny>,
-        bbox_format: &str,
-        keypoint_format: &str,
+        bbox: Option<&'py PyAny>,
+        keypoint: Option<&'py PyAny>,
+        bbox_format: Option<&str>,
+        keypoint_format: Option<&str>,
         seed: Option<u64>,
         inplace: Option<bool>,
         labels: Option<&'py PyAny>,
+        optimize: Option<bool>,
+        kwargs: Option<&'py PyDict>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
-        if labels.is_some() {
+        let has_singular_bbox = bbox.is_some() && bboxes.is_none();
+        let has_singular_keypoint = keypoint.is_some() && keypoints.is_none();
+        let effective_bboxes = bboxes.or(bbox);
+        let effective_keypoints = keypoints.or(keypoint);
+
+        if effective_bboxes.is_some() && labels.is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "labels is not a separate argument: classification labels ride as extra \
+                "labels is not a separate argument when bboxes are provided: classification labels ride as extra \
                  bbox columns (pass an N×5 array with the class id in column 5, e.g. \
                  bboxes=np.array([[x, y, w, h, class_id]], dtype=np.float32))",
             ));
         }
+
+        // Auto-dispatch 4D batch tensors / ndarrays if no targets specified
+        let is_4d = if crate::python::tensor::is_torch_tensor(image) {
+            let shape: Vec<usize> = image.getattr("shape")?.extract()?;
+            shape.len() == 4
+        } else if let Ok(arr4) = image.downcast::<numpy::PyArray4<u8>>() {
+            let _ = arr4;
+            true
+        } else {
+            false
+        };
+
+        if is_4d && effective_bboxes.is_none() && effective_keypoints.is_none() && masks.is_none() && mask.is_none() {
+            let batch_res = self.apply_batch(image, inplace, None, seed, py)?;
+            let dict = PyDict::new(py);
+            dict.set_item("image", batch_res)?;
+            if let Some(lbl) = labels {
+                dict.set_item("labels", lbl)?;
+            }
+            if let Some(extra) = kwargs {
+                for (k, v) in extra.iter() {
+                    dict.set_item(k, v)?;
+                }
+            }
+            return Ok(dict.to_object(py));
+        }
+
+        let effective_bbox_format = bbox_format
+            .or(self.default_bbox_format.as_deref())
+            .unwrap_or("xywh");
+
+        let effective_keypoint_format = keypoint_format
+            .or(self.default_keypoint_format.as_deref())
+            .unwrap_or("xy");
+
         let seed_value = seed.unwrap_or_else(rand::random);
         let sampled_inner = self.inner.sample_with_seed(seed_value);
         let sampled = PySampledImageProgram {
             inner: sampled_inner,
         };
-        sampled.__call__(
+        let res_obj = sampled.__call__(
             image,
-            bboxes,
-            keypoints,
+            effective_bboxes,
+            effective_keypoints,
             masks,
             mask,
-            bbox_format,
-            keypoint_format,
+            effective_bbox_format,
+            effective_keypoint_format,
             inplace,
+            optimize,
             py,
-        )
+        )?;
+
+        if let Ok(dict) = res_obj.extract::<&PyDict>(py) {
+            if has_singular_bbox {
+                if let Ok(Some(b)) = dict.get_item("bboxes") {
+                    dict.set_item("bbox", b)?;
+                    dict.del_item("bboxes")?;
+                }
+            }
+            if has_singular_keypoint {
+                if let Ok(Some(k)) = dict.get_item("keypoints") {
+                    dict.set_item("keypoint", k)?;
+                    dict.del_item("keypoints")?;
+                }
+            }
+            if let Some(lbl) = labels {
+                dict.set_item("labels", lbl)?;
+            }
+            if let Some(extra) = kwargs {
+                for (k, v) in extra.iter() {
+                    dict.set_item(k, v)?;
+                }
+            }
+            Ok(dict.to_object(py))
+        } else {
+            Ok(res_obj)
+        }
     }
 
     /// Apply with new random parameters each call (backward compatible)
     ///
     /// This is a convenience method that returns only the transformed image.
     /// Default `inplace=False` ensures input arrays are never mutated.
-    #[pyo3(signature = (array, inplace=None, seed=None))]
+    #[pyo3(signature = (array, inplace=None, seed=None, optimize=None))]
     pub(crate) fn apply<'py>(
         &self,
         array: &'py PyAny,
         inplace: Option<bool>,
         seed: Option<u64>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<&'py PyAny> {
+        let is_4d = if crate::python::tensor::is_torch_tensor(array) {
+            let shape: Vec<usize> = array.getattr("shape")?.extract()?;
+            shape.len() == 4
+        } else if let Ok(arr4) = array.downcast::<numpy::PyArray4<u8>>() {
+            let _ = arr4;
+            true
+        } else {
+            false
+        };
+
+        if is_4d {
+            return self.apply_batch(array, inplace, None, seed, py);
+        }
+
         let seed_value = seed.unwrap_or_else(rand::random);
         let sampled_inner = self.inner.sample_with_seed(seed_value);
         let sampled = PySampledImageProgram {
             inner: sampled_inner,
         };
 
-        sampled.apply(array, inplace, py)
+        sampled.apply(array, inplace, optimize, py)
     }
 
     /// Apply this pipeline to a batch of images in parallel across CPU cores
@@ -263,25 +380,41 @@ impl PyCompose {
         })
     }
 
-    /// Sample with seed for deterministic reuse
-    fn sample_with_seed(&self, seed: u64) -> PyResult<PySampledImageProgram> {
-        let sampled = self.inner.sample_with_seed(seed);
-        Ok(PySampledImageProgram { inner: sampled })
-    }
-
-    /// Export the compiled execution plan as a Mermaid flowchart markdown string
-    #[pyo3(signature = (seed=None, direction="LR"))]
-    fn to_mermaid(&self, seed: Option<u64>, direction: &str) -> String {
-        let seed_val = seed.unwrap_or(42);
+    /// Apply video augmentation to a single video clip [T, C, H, W], [T, H, W, C], or list of frames
+    ///
+    /// The pipeline is sampled ONCE for the entire clip, guaranteeing temporal
+    /// consistency (all frames receive identical spatial transformations).
+    #[pyo3(signature = (video, inplace=None, seed=None, num_threads=None))]
+    pub fn apply_video<'py>(
+        &self,
+        video: &'py PyAny,
+        inplace: Option<bool>,
+        seed: Option<u64>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let seed_val = seed.unwrap_or_else(rand::random);
         let sampled = self.inner.sample_with_seed(seed_val);
-        sampled.to_mermaid(Some(direction))
+        crate::python::batch::parallel_apply_video_clip(py, video, &sampled, inplace, num_threads)
     }
 
-    /// Visualize the compiled execution plan graph (prints and returns Mermaid markdown)
-    #[pyo3(signature = (seed=None, direction="LR"))]
-    fn visualize(&self, seed: Option<u64>, direction: &str) -> String {
-        let mermaid = self.to_mermaid(seed, direction);
-        println!("{}", mermaid);
-        mermaid
+    /// Apply video augmentation to a batch of video clips [B, T, C, H, W], [B, T, H, W, C], or list of clips
+    ///
+    /// Each clip b in [0, B) receives an independently sampled program that is
+    /// applied consistently across all T frames of that clip.
+    #[pyo3(signature = (videos, inplace=None, seed=None, num_threads=None))]
+    pub fn apply_video_batch<'py>(
+        &self,
+        videos: &'py PyAny,
+        inplace: Option<bool>,
+        seed: Option<u64>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        let base_seed = seed.unwrap_or_else(rand::random);
+        let inner = self.inner.clone();
+        crate::python::batch::parallel_apply_video_batch(py, videos, inplace, num_threads, move |clip_idx| {
+            inner.sample_with_seed(base_seed.wrapping_add(clip_idx as u64))
+        })
     }
 }

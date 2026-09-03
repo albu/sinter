@@ -367,13 +367,12 @@ unsafe fn process_batch(
     // Saturation (0..255)
     // S = (Delta * 255) / Max
     let max_gt_0 = vcgtq_f32(max, zeroes);
-    let inv_max = vrecip(max);
-    let s_val = vmulq_f32(vmulq_f32(delta, two_five_five), inv_max);
+    let s_val = vdivq_f32(vmulq_f32(delta, two_five_five), max);
     let s_old = vbslq_f32(max_gt_0, s_val, zeroes);
 
     // Hue (0..360)
     let delta_is_zero = vceqq_f32(delta, zeroes);
-    let inv_delta = vrecip(delta);
+    let inv_delta = vdivq_f32(ones, delta);
 
     // Terms for Hue calculation
     let max_is_r = vceqq_f32(max, r);

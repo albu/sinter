@@ -12,7 +12,9 @@ use crate::exec_ir::optimizer::{
 use crate::sampled_ir::SampledImageOp;
 use crate::transforms::{
     runtime::lut::LutExecutor, runtime::matrix::MatrixExecutor, FusedLut, FusedMatrix, LutOp, MatrixOp,
+    ToGray,
 };
+
 
 /// Extractive Fusion - Fuse contiguous homogeneous groups
 ///
@@ -93,30 +95,40 @@ pub(crate) fn try_extractive_fusion(fused: &mut Vec<SampledImageOp>) -> FusionRe
             }
         }
 
+        // Try to extract a LUT group followed by ToGray (pointwise fusion)
+        let lut_count = find_contiguous_group_end(&fused[start..], |t| t.is_lut_op());
+        let has_trailing_to_gray = matches!(fused.get(start + lut_count), Some(SampledImageOp::ToGray));
+
+        if has_trailing_to_gray && lut_count >= 1 {
+            let total_len = lut_count + 1;
+            let group: Vec<SampledImageOp> = fused.drain(start..start + total_len).collect();
+            let fused_lut = FusedLut::from_sampled_ops(&group[..lut_count]);
+            let luts_3c = fused_lut
+                .luts_3c
+                .unwrap_or([fused_lut.lut, fused_lut.lut, fused_lut.lut]);
+            nodes.push(ExecNode::with_kernel_kind(
+                ExecNodeKind::Fused(group),
+                crate::exec_ir::nodes::KernelKind::LutToGray {
+                    luts_3c: Box::new(luts_3c),
+                },
+            ));
+            continue;
+        }
+
         // Try to extract a regular LUT group
         let lut_end = start + find_contiguous_group_end(&fused[start..], |t| t.is_lut_op());
         if lut_end - start >= 2 {
-            // Drain the LUT group and fuse it
+            // Drain the LUT group and fuse it directly with zero heap allocations
             let lut_group: Vec<SampledImageOp> = fused.drain(start..lut_end).collect();
-            let lut_ops: Vec<Box<dyn LutOp>> = lut_group
-                .iter()
-                .filter_map(|t| try_as_lut_op_sampled(t))
-                .collect();
-
-            if !lut_ops.is_empty() {
-                let fused_lut = FusedLut::from_ops(&lut_ops);
-                if !fused_lut.is_identity() {
-                    let lut = fused_lut.lut;
-                    let kernel: FastKernel =
-                        Box::new(move |image: &mut FusableImage| -> Option<BarrierImage> {
-                            LutExecutor::apply(image, &lut);
-                            None
-                        });
-                    nodes.push(ExecNode::with_kernel(
-                        ExecNodeKind::Fused(lut_group),
-                        kernel,
-                    ));
-                }
+            let fused_lut = FusedLut::from_sampled_ops(&lut_group);
+            if !fused_lut.is_identity() {
+                nodes.push(ExecNode::with_kernel_kind(
+                    ExecNodeKind::Fused(lut_group),
+                    crate::exec_ir::nodes::KernelKind::FusedLut {
+                        luts_3c: fused_lut.luts_3c.map(Box::new),
+                        lut_1c: fused_lut.lut,
+                    },
+                ));
             }
             continue;
         }
@@ -135,28 +147,21 @@ pub(crate) fn try_extractive_fusion(fused: &mut Vec<SampledImageOp>) -> FusionRe
             if !matrix_ops.is_empty() {
                 let refs: Vec<&dyn MatrixOp> = matrix_ops.iter().map(|b| b.as_ref()).collect();
                 let fused_matrix = FusedMatrix::from_matrix_ops(&refs);
-
-                // Store the ORIGINAL transforms in the ExecNode for counting
-                // The kernel provides the optimized execution path
-                let matrix = fused_matrix.matrix;
-                let kernel: FastKernel =
-                    Box::new(move |image: &mut FusableImage| -> Option<BarrierImage> {
-                        if image.channels == 3 {
-                            MatrixExecutor::apply(image, &matrix);
-                        }
-                        None
-                    });
-                nodes.push(ExecNode::with_kernel(
+                nodes.push(ExecNode::with_kernel_kind(
                     ExecNodeKind::Fused(matrix_group),
-                    kernel,
+                    crate::exec_ir::nodes::KernelKind::FusedMatrix(fused_matrix),
                 ));
             }
             continue;
         }
 
-        // Single transform - create individual node with fast kernel
+        // Single transform - create individual node with static enum kernel
         let transform = fused.remove(start);
-        nodes.push(create_single_transform_node(transform));
+        let kernel_kind = crate::exec_ir::nodes::KernelKind::Single(transform.clone());
+        nodes.push(ExecNode::with_kernel_kind(
+            ExecNodeKind::Fused(vec![transform]),
+            kernel_kind,
+        ));
         // Don't increment start - we removed an element
     }
 
@@ -167,13 +172,10 @@ pub(crate) fn try_extractive_fusion(fused: &mut Vec<SampledImageOp>) -> FusionRe
     }
 }
 
-/// Create a single-transform ExecNode
-///
-/// Single-transform nodes use FAST PATH 2 in the executor (vtable dispatch via as_executable()),
-/// which is faster than the kernel path for single operations.
-/// We keep kernel=None to enable this optimization.
+/// Create a single-transform ExecNode using static enum dispatch
 fn create_single_transform_node(transform: SampledImageOp) -> ExecNode {
-    ExecNode::fused(vec![transform])
+    let kernel_kind = crate::exec_ir::nodes::KernelKind::Single(transform.clone());
+    ExecNode::with_kernel_kind(ExecNodeKind::Fused(vec![transform]), kernel_kind)
 }
 
 /// Find the end of a contiguous group where predicate is true

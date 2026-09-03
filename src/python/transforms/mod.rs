@@ -10,7 +10,9 @@ use pyo3::prelude::*;
 
 mod random;
 mod compose;
+pub mod choice;
 mod helpers;
+pub mod anyres;
 
 // Unified API (with distribution support) - exports ALL transforms
 pub use random::{
@@ -26,6 +28,8 @@ pub use random::{
     PyGaussianBlur, PyGaussianBlurSigma, PyMedianBlur, PySharpen, PyEmboss, PyEdgeDetection,
 };
 pub use compose::PyCompose;
+pub use choice::{PyChoice, PyIdentity};
+pub use anyres::PyAnyRes;
 
 /// Trait for extracting the inner transform from Python wrappers
 #[cfg(feature = "python")]

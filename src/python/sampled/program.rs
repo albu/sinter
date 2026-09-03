@@ -343,7 +343,7 @@ impl PySampledImageProgram {
     ///
     /// # Returns
     /// Dictionary with keys: "image", and optionally "bboxes", "keypoints", "masks"
-    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None))]
+    #[pyo3(signature = (image, bboxes=None, keypoints=None, masks=None, mask=None, bbox_format="xywh", keypoint_format="xy", inplace=None, optimize=None))]
     pub(crate) fn __call__<'py>(
         &self,
         image: &'py PyAny,
@@ -354,9 +354,10 @@ impl PySampledImageProgram {
         bbox_format: &str,
         keypoint_format: &str,
         inplace: Option<bool>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<PyObject> {
-        let transformed_image_array = self.apply(image, inplace, py)?;
+        let transformed_image_array = self.apply(image, inplace, optimize, py)?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("image", transformed_image_array)?;
@@ -471,16 +472,17 @@ impl PySampledImageProgram {
     ///
     /// # Returns
     /// A transformed numpy array or torch.Tensor matching the input type and layout
-    #[pyo3(signature = (array, inplace=None))]
+    #[pyo3(signature = (array, inplace=None, optimize=None))]
     pub(crate) fn apply<'py>(
         &self,
         array: &'py PyAny,
         inplace: Option<bool>,
+        optimize: Option<bool>,
         py: Python<'py>,
     ) -> PyResult<&'py PyAny> {
         if crate::python::tensor::is_torch_tensor(array) {
             return crate::python::tensor::handle_torch_tensor(array, inplace, py, |np_arr, inp, p| {
-                self.apply(np_arr, inp, p)
+                self.apply(np_arr, inp, optimize, p)
             });
         }
 
@@ -506,11 +508,40 @@ impl PySampledImageProgram {
         // Convert SampledImageProgram to Plan
         let plan = self.inner.to_plan();
 
-        // Optimize the plan
-        let exec_plan = Optimizer::new().optimize(plan);
+        // Optimize the plan (or keep unoptimized if optimize=False)
+        let exec_plan = if optimize.unwrap_or(true) {
+            Optimizer::new().optimize(plan)
+        } else {
+            plan.to_unoptimized_exec_plan()
+        };
 
         let is_inplace = inplace.unwrap_or(false);
-        let needs_copy = !is_inplace && exec_plan.mutates_input();
+        let is_c_contiguous = array
+            .getattr("flags")
+            .and_then(|f| f.getattr("c_contiguous"))
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(true);
+
+        if is_inplace && !is_c_contiguous {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot mutate non-contiguous array with inplace=True; use inplace=False to allow defensive copy",
+            ));
+        }
+
+        if is_inplace && exec_plan.mutates_input() {
+            let is_writeable = array
+                .getattr("flags")
+                .and_then(|f| f.getattr("writeable"))
+                .and_then(|w| w.extract::<bool>())
+                .unwrap_or(true);
+            if !is_writeable {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate read-only array with inplace=True; use inplace=False to create a defensive copy",
+                ));
+            }
+        }
+
+        let needs_copy = (!is_inplace && exec_plan.mutates_input()) || !is_c_contiguous;
         let working_array = if needs_copy {
             array.call_method0("copy")?
         } else {
@@ -545,23 +576,44 @@ impl PySampledImageProgram {
             match result {
                 Some(new_barrier) => {
                     let (new_h, new_w, new_c) = (new_barrier.height, new_barrier.width, new_barrier.channels);
-                    let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
-                    if new_c == 1 {
-                        let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Failed to reshape array: {}",
-                                e
-                            ))
-                        })?;
-                        Ok(array_2d.as_ref())
+                    if let Some(f32_data) = new_barrier.f32_data {
+                        let array_1d = numpy::PyArray1::from_vec(py, f32_data);
+                        if new_c == 1 {
+                            let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_2d.as_ref())
+                        } else {
+                            let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_3d.as_ref())
+                        }
                     } else {
-                        let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Failed to reshape array: {}",
-                                e
-                            ))
-                        })?;
-                        Ok(array_3d.as_ref())
+                        let array_1d = numpy::PyArray1::from_vec(py, new_barrier.data);
+                        if new_c == 1 {
+                            let array_2d = array_1d.reshape([new_h, new_w]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_2d.as_ref())
+                        } else {
+                            let array_3d = array_1d.reshape([new_h, new_w, new_c]).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Failed to reshape array: {}",
+                                    e
+                                ))
+                            })?;
+                            Ok(array_3d.as_ref())
+                        }
                     }
                 }
                 None => Ok(array2.as_ref()),
@@ -586,6 +638,18 @@ impl PySampledImageProgram {
         crate::python::batch::parallel_apply_batch(py, images, inplace, num_threads, move |_| {
             prog.clone()
         })
+    }
+
+    /// Apply this sampled program across all frames of a video clip [T, C, H, W], [T, H, W, C], or list of frames
+    #[pyo3(signature = (video, inplace=None, num_threads=None))]
+    pub fn apply_video<'py>(
+        &self,
+        video: &'py PyAny,
+        inplace: Option<bool>,
+        num_threads: Option<usize>,
+        py: Python<'py>,
+    ) -> PyResult<&'py PyAny> {
+        crate::python::batch::parallel_apply_video_clip(py, video, &self.inner, inplace, num_threads)
     }
 
     /// Apply the program to bounding boxes (supports N, 4+ column arrays)
@@ -765,7 +829,32 @@ impl PySampledImageProgram {
         let exec_plan = Optimizer::new().optimize(plan);
 
         let is_inplace = inplace.unwrap_or(false);
-        let needs_copy = !is_inplace && exec_plan.mutates_input();
+        let is_c_contiguous = mask
+            .getattr("flags")
+            .and_then(|f| f.getattr("c_contiguous"))
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(true);
+
+        if is_inplace && !is_c_contiguous {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot mutate non-contiguous mask with inplace=True; use inplace=False to allow defensive copy",
+            ));
+        }
+
+        if is_inplace && exec_plan.mutates_input() {
+            let is_writeable = mask
+                .getattr("flags")
+                .and_then(|f| f.getattr("writeable"))
+                .and_then(|w| w.extract::<bool>())
+                .unwrap_or(true);
+            if !is_writeable {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot mutate read-only mask with inplace=True; use inplace=False to create a defensive copy",
+                ));
+            }
+        }
+
+        let needs_copy = (!is_inplace && exec_plan.mutates_input()) || !is_c_contiguous;
         let working_mask = if needs_copy {
             mask.call_method0("copy")?
         } else {

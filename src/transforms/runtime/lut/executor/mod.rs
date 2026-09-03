@@ -77,7 +77,29 @@ impl FusedLutExecutor {
 
         fused
     }
+
+    /// Compose multiple LUTs into per-channel (RGB) LUTs
+    pub fn compose_3c_luts(ops: &[Box<dyn LutOp>]) -> [[u8; 256]; 3] {
+        let mut fused = [[0u8; 256]; 3];
+        for c in 0..3 {
+            for i in 0..256 {
+                fused[c][i] = i as u8;
+            }
+        }
+
+        for op in ops {
+            let luts = op.build_lut_3c();
+            for i in 0..256 {
+                fused[0][i] = luts[0][fused[0][i] as usize];
+                fused[1][i] = luts[1][fused[1][i] as usize];
+                fused[2][i] = luts[2][fused[2][i] as usize];
+            }
+        }
+
+        fused
+    }
 }
+
 
 /// LUT executor with optimized application
 ///

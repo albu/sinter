@@ -41,8 +41,8 @@ macro_rules! register_classes {
 // Unified API transforms (with distribution support)
 #[cfg(feature = "python")]
 use transforms::{
-    PyAffine, PyAutoContrast, PyBrightness, PyChannelShuffle, PyCoarseDropout, PyColorBalance,
-    PyColorTemperature, PyColorTint, PyCompose, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
+    PyAffine, PyAnyRes, PyAutoContrast, PyBrightness, PyChannelShuffle, PyCoarseDropout, PyColorBalance,
+    PyColorTemperature, PyColorTint, PyCompose, PyChoice, PyIdentity, PyContrast, PyCrop, PyEdgeDetection, PyEmboss,
     PyEqualize, PyGamma, PyGaussNoise, PyGaussianBlur, PyGaussianBlurSigma, PyGridDropout,
     PyHorizontalFlip, PyHueSaturationValue, PyInvert, PyMedianBlur, PyMultiplicativeNoise,
     PyNormalize, PyPad, PyPosterize, PyRandomCrop, PyRGBShift, PyResize, PyRotate,
@@ -95,6 +95,7 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
         PyRandomCrop,
         PyPad,
         PyAffine,
+        PyAnyRes,
     );
 
     // Photometric transforms (parameter-based)
@@ -142,8 +143,11 @@ fn sinter(_py: Python, m: &PyModule) -> PyResult<()> {
         PyEdgeDetection,
     );
 
-    // Main compose
+    // Main compose, choice, identity
     m.add_class::<PyCompose>()?;
+    m.add_class::<PyChoice>()?;
+    m.add_class::<PyIdentity>()?;
+    m.add("OneOf", m.getattr("Choice")?)?;
 
     // ===== ENUMS =====
     register_classes!(

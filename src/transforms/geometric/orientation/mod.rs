@@ -45,7 +45,7 @@ impl Orientation {
             (Orientation::Identity, o) => o,
             (s, Orientation::Identity) => s,
 
-            // Rotations compose (add mod 4, where 0=Identity, 1=Rot90, 2=Rot180, 3=Rot270)
+            // Rotations compose (clockwise: Rot90 + Rot90 = Rot180, etc.)
             (Orientation::Rot90, Orientation::Rot90) => Orientation::Rot180,
             (Orientation::Rot90, Orientation::Rot180) => Orientation::Rot270,
             (Orientation::Rot90, Orientation::Rot270) => Orientation::Identity,
@@ -80,33 +80,33 @@ impl Orientation {
             (Orientation::Transpose, Orientation::Transpose) => Orientation::Identity,
             (Orientation::Transverse, Orientation::Transverse) => Orientation::Identity,
 
-            // Transpose with rotations
-            (Orientation::Transpose, Orientation::Rot90) => Orientation::FlipV,
+            // Transpose with rotations (verified in image coordinates)
+            (Orientation::Transpose, Orientation::Rot90) => Orientation::FlipH,
             (Orientation::Transpose, Orientation::Rot180) => Orientation::Transverse,
-            (Orientation::Transpose, Orientation::Rot270) => Orientation::FlipH,
-            (Orientation::Rot90, Orientation::Transpose) => Orientation::FlipH,
+            (Orientation::Transpose, Orientation::Rot270) => Orientation::FlipV,
+            (Orientation::Rot90, Orientation::Transpose) => Orientation::FlipV,
             (Orientation::Rot180, Orientation::Transpose) => Orientation::Transverse,
-            (Orientation::Rot270, Orientation::Transpose) => Orientation::FlipV,
+            (Orientation::Rot270, Orientation::Transpose) => Orientation::FlipH,
 
-            // Transverse with rotations
-            (Orientation::Transverse, Orientation::Rot90) => Orientation::FlipH,
+            // Transverse with rotations (verified in image coordinates)
+            (Orientation::Transverse, Orientation::Rot90) => Orientation::FlipV,
             (Orientation::Transverse, Orientation::Rot180) => Orientation::Transpose,
-            (Orientation::Transverse, Orientation::Rot270) => Orientation::FlipV,
-            (Orientation::Rot90, Orientation::Transverse) => Orientation::FlipV,
+            (Orientation::Transverse, Orientation::Rot270) => Orientation::FlipH,
+            (Orientation::Rot90, Orientation::Transverse) => Orientation::FlipH,
             (Orientation::Rot180, Orientation::Transverse) => Orientation::Transpose,
-            (Orientation::Rot270, Orientation::Transverse) => Orientation::FlipH,
+            (Orientation::Rot270, Orientation::Transverse) => Orientation::FlipV,
 
             // Mixed flip combinations
             (Orientation::FlipH, Orientation::FlipV) => Orientation::Rot180,
             (Orientation::FlipV, Orientation::FlipH) => Orientation::Rot180,
-            (Orientation::FlipH, Orientation::Transpose) => Orientation::Rot90,
-            (Orientation::FlipH, Orientation::Transverse) => Orientation::Rot270,
-            (Orientation::FlipV, Orientation::Transpose) => Orientation::Rot270,
-            (Orientation::FlipV, Orientation::Transverse) => Orientation::Rot90,
-            (Orientation::Transpose, Orientation::FlipH) => Orientation::Rot270,
-            (Orientation::Transpose, Orientation::FlipV) => Orientation::Rot90,
-            (Orientation::Transverse, Orientation::FlipH) => Orientation::Rot90,
-            (Orientation::Transverse, Orientation::FlipV) => Orientation::Rot270,
+            (Orientation::FlipH, Orientation::Transpose) => Orientation::Rot270,
+            (Orientation::FlipH, Orientation::Transverse) => Orientation::Rot90,
+            (Orientation::FlipV, Orientation::Transpose) => Orientation::Rot90,
+            (Orientation::FlipV, Orientation::Transverse) => Orientation::Rot270,
+            (Orientation::Transpose, Orientation::FlipH) => Orientation::Rot90,
+            (Orientation::Transpose, Orientation::FlipV) => Orientation::Rot270,
+            (Orientation::Transverse, Orientation::FlipH) => Orientation::Rot270,
+            (Orientation::Transverse, Orientation::FlipV) => Orientation::Rot90,
             (Orientation::Transpose, Orientation::Transverse) => Orientation::Rot180,
             (Orientation::Transverse, Orientation::Transpose) => Orientation::Rot180,
         }

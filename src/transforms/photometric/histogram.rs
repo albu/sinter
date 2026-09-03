@@ -45,10 +45,49 @@ impl Equalize {
                 let val = ((sum - hist[i]) as f32 * scale).round() as i32;
                 lut[j] = val.clamp(0, 255) as u8;
             }
+        } else {
+            // Identity LUT for uniform/flat images (matching OpenCV equalizeHist)
+            for j in 0..256 {
+                lut[j] = j as u8;
+            }
         }
         lut
     }
+
+    /// Compute RGB or Grayscale LUTs from image histogram without applying them
+    pub fn build_luts_from_image(image: &FusableImage) -> Option<[[u8; 256]; 3]> {
+        let channels = image.channels;
+        let total_pixels = (image.width * image.height) as u32;
+
+        if channels == 3 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let chunks = image.data.chunks_exact(3);
+            for chunk in chunks {
+                hist_r[chunk[0] as usize] += 1;
+                hist_g[chunk[1] as usize] += 1;
+                hist_b[chunk[2] as usize] += 1;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+            Some([lut_r, lut_g, lut_b])
+        } else if channels == 1 {
+            let mut hist = [0u32; 256];
+            for &pixel in image.data.iter() {
+                hist[pixel as usize] += 1;
+            }
+            let lut = Self::compute_lut(&hist, total_pixels);
+            Some([lut, lut, lut])
+        } else {
+            None
+        }
+    }
 }
+
 
 impl Transform for Equalize {
     fn access(&self) -> AccessPattern {
@@ -98,6 +137,31 @@ impl Executable for Equalize {
 
             let luts = [lut_r, lut_g, lut_b];
             LutExecutor::apply_rgb_luts(image, &luts);
+        } else if channels == 4 {
+            let mut hist_r = [0u32; 256];
+            let mut hist_g = [0u32; 256];
+            let mut hist_b = [0u32; 256];
+
+            let mut i = 0;
+            let len = image.data.len();
+            while i + 4 <= len {
+                hist_r[image.data[i] as usize] += 1;
+                hist_g[image.data[i + 1] as usize] += 1;
+                hist_b[image.data[i + 2] as usize] += 1;
+                i += 4;
+            }
+
+            let lut_r = Self::compute_lut(&hist_r, total_pixels);
+            let lut_g = Self::compute_lut(&hist_g, total_pixels);
+            let lut_b = Self::compute_lut(&hist_b, total_pixels);
+
+            let mut i = 0;
+            while i + 4 <= len {
+                image.data[i] = lut_r[image.data[i] as usize];
+                image.data[i + 1] = lut_g[image.data[i + 1] as usize];
+                image.data[i + 2] = lut_b[image.data[i + 2] as usize];
+                i += 4;
+            }
         } else {
             let mut hist = [0u32; 256];
             for &pixel in image.data.iter() {
@@ -139,31 +203,95 @@ impl AutoContrast {
     /// Build contrast stretch LUT from image min/max
     ///
     /// Uses fixed-point arithmetic to avoid float operations.
-    fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
-        // 256-bin histogram so `cutoff` can ignore extreme-outlier pixels.
-        let mut hist = [0u32; 256];
-        let total = image.data.len() as u32;
-        for &pixel in image.data.iter() {
-            hist[pixel as usize] += 1;
-        }
+    pub fn build_lut_from_image(&self, image: &FusableImage) -> [u8; 256] {
+        let (lo, hi) = if self.cutoff == 0.0 {
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let mut min0 = vdupq_n_u8(255);
+                let mut min1 = vdupq_n_u8(255);
+                let mut min2 = vdupq_n_u8(255);
+                let mut min3 = vdupq_n_u8(255);
+                let mut max0 = vdupq_n_u8(0);
+                let mut max1 = vdupq_n_u8(0);
+                let mut max2 = vdupq_n_u8(0);
+                let mut max3 = vdupq_n_u8(0);
+                let chunks = image.data.len() / 64;
+                let mut ptr = image.data.as_ptr();
+                for _ in 0..chunks {
+                    let v0 = vld1q_u8(ptr);
+                    let v1 = vld1q_u8(ptr.add(16));
+                    let v2 = vld1q_u8(ptr.add(32));
+                    let v3 = vld1q_u8(ptr.add(48));
+                    ptr = ptr.add(64);
+                    min0 = vminq_u8(min0, v0);
+                    min1 = vminq_u8(min1, v1);
+                    min2 = vminq_u8(min2, v2);
+                    min3 = vminq_u8(min3, v3);
+                    max0 = vmaxq_u8(max0, v0);
+                    max1 = vmaxq_u8(max1, v1);
+                    max2 = vmaxq_u8(max2, v2);
+                    max3 = vmaxq_u8(max3, v3);
+                }
+                let min_v = vminq_u8(vminq_u8(min0, min1), vminq_u8(min2, min3));
+                let max_v = vmaxq_u8(vmaxq_u8(max0, max1), vmaxq_u8(max2, max3));
+                let mut lo = vminvq_u8(min_v);
+                let mut hi = vmaxvq_u8(max_v);
+                let base = image.data.as_ptr();
+                for i in (chunks * 64)..image.data.len() {
+                    let val = *base.add(i);
+                    lo = lo.min(val);
+                    hi = hi.max(val);
+                }
+                (lo, hi)
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let lo = *image.data.iter().min().unwrap_or(&0);
+                let hi = *image.data.iter().max().unwrap_or(&255);
+                (lo, hi)
+            }
+        } else {
+            // 256-bin histogram with 4 sub-tables to avoid store-load forwarding stalls
+            let mut h0 = [0u32; 256];
+            let mut h1 = [0u32; 256];
+            let mut h2 = [0u32; 256];
+            let mut h3 = [0u32; 256];
+            let chunks = image.data.len() / 4;
+            let ptr = image.data.as_ptr();
+            for i in 0..chunks {
+                unsafe {
+                    h0[*ptr.add(i * 4) as usize] += 1;
+                    h1[*ptr.add(i * 4 + 1) as usize] += 1;
+                    h2[*ptr.add(i * 4 + 2) as usize] += 1;
+                    h3[*ptr.add(i * 4 + 3) as usize] += 1;
+                }
+            }
+            let mut hist = [0u32; 256];
+            for i in 0..256 {
+                hist[i] = h0[i] + h1[i] + h2[i] + h3[i];
+            }
+            for i in (chunks * 4)..image.data.len() {
+                hist[image.data[i] as usize] += 1;
+            }
+            let total = image.data.len() as u32;
 
-        // Trim `cutoff * total` pixels from each end (albumentations semantics:
-        // cutoff is the fraction of pixels ignored at the low and high ends).
-        let trim = (total as f32 * self.cutoff).round() as u32;
+            let trim = (total as f32 * self.cutoff).round() as u32;
+            let mut lo = 0u8;
+            let mut remaining = trim;
+            while lo < 255 && remaining >= hist[lo as usize] {
+                remaining -= hist[lo as usize];
+                lo += 1;
+            }
 
-        let mut lo = 0u8;
-        let mut remaining = trim;
-        while lo < 255 && remaining >= hist[lo as usize] {
-            remaining -= hist[lo as usize];
-            lo += 1;
-        }
-
-        let mut hi = 255u8;
-        let mut remaining = trim;
-        while hi > 0 && remaining >= hist[hi as usize] {
-            remaining -= hist[hi as usize];
-            hi -= 1;
-        }
+            let mut hi = 255u8;
+            let mut remaining = trim;
+            while hi > 0 && remaining >= hist[hi as usize] {
+                remaining -= hist[hi as usize];
+                hi -= 1;
+            }
+            (lo, hi)
+        };
 
         // Uniform (or fully trimmed) image: preserve the historical edge case.
         if lo >= hi {

@@ -31,42 +31,74 @@ use crate::sampled_ir::SampledImageOp;
 /// # Why This Works
 /// Geometric ops only change *where* a pixel is read from.
 /// Photometric ops only change *what* the pixel value is.
-/// These are independent dimensions of the image, so they commute.
+/// Check if an op is a pointwise photometric transform that commutes with Crop.
+///
+/// Algebraic law:
+/// For any pointwise photometric transform P (LUT, Matrix, pointwise color):
+///     Crop(P(image)) == P(Crop(image))
+pub fn is_pointwise_photometric(op: &SampledImageOp) -> bool {
+    matches!(
+        op,
+        SampledImageOp::Brightness { .. }
+            | SampledImageOp::Contrast { .. }
+            | SampledImageOp::Gamma { .. }
+            | SampledImageOp::Invert
+            | SampledImageOp::Posterize { .. }
+            | SampledImageOp::Solarize { .. }
+            | SampledImageOp::RGBShift { .. }
+            | SampledImageOp::ToSepia
+            | SampledImageOp::ColorTemperature { .. }
+            | SampledImageOp::ChannelMix { .. }
+            | SampledImageOp::ColorBalance { .. }
+            | SampledImageOp::HueSaturationValue { .. }
+            | SampledImageOp::ToGray
+            | SampledImageOp::Normalize { .. }
+    )
+}
+
+/// Hoist Crop and RandomCrop before preceding pointwise photometric transforms.
+///
+/// When a Crop appears after pointwise photometric transforms (e.g. Brightness -> Crop),
+/// computing the photometric transform on the full image before discarding 90-99% of the
+/// pixels is pure wasted work.
+///
+/// Because pointwise transforms commute with Crop:
+///     Crop(P(image)) == P(Crop(image))
+///
+/// This pass bubbles Crop leftwards across any preceding pointwise photometric transforms,
+/// ensuring that photometric processing is only evaluated on the surviving cropped pixels.
+pub fn hoist_crops(ops: &mut Vec<SampledImageOp>) {
+    let mut i = 0;
+    while i < ops.len() {
+        if matches!(ops[i], SampledImageOp::Crop { .. } | SampledImageOp::RandomCrop { .. }) {
+            let mut j = i;
+            while j > 0 && is_pointwise_photometric(&ops[j - 1]) {
+                ops.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+        i += 1;
+    }
+}
+
 pub fn canonicalize(fused: &mut Vec<SampledImageOp>) {
     if fused.len() <= 1 {
         return; // Nothing to reorder
     }
 
-    // Separate into geometric and photometric transforms
-    // using the new ReorderRule classification
-    let mut geometric: Vec<SampledImageOp> = Vec::new();
-    let mut photometric: Vec<SampledImageOp> = Vec::new();
-
-    for op in fused.drain(..) {
-        match op.reorder_rule() {
-            ReorderRule::Geometry => {
-                geometric.push(op);
-            }
-            ReorderRule::CommutesWithGeometry => {
-                photometric.push(op);
-            }
-            ReorderRule::Barrier => {
-                // Should not happen - barriers split blocks before canonicalization
-                // But if we encounter one, put it back and continue draining remaining transforms
-                photometric.push(op);
-                // Don't break - continue draining the iterator to preserve all transforms
+    // Hoist geometric transforms to the left across operations that commute with geometry.
+    // If an operation is a barrier (like GaussianBlur or Equalize), geometry stops and
+    // will NOT be hoisted across it.
+    let mut i = 0;
+    while i < fused.len() {
+        if matches!(fused[i].reorder_rule(), ReorderRule::Geometry) {
+            let mut j = i;
+            while j > 0 && matches!(fused[j - 1].reorder_rule(), ReorderRule::CommutesWithGeometry) {
+                fused.swap(j, j - 1);
+                j -= 1;
             }
         }
-    }
-
-    // Rebuild the vector with geometric transforms hoisted to the boundary
-    // We use the convention: [geometry...][photometric...]
-    // This means geometric ops are applied first, then photometric
-    for t in geometric {
-        fused.push(t);
-    }
-    for t in photometric {
-        fused.push(t);
+        i += 1;
     }
 }
 
