@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sinter"
-version = "0.2.0"
+version = "0.3.0"
 description = "Research prototype for compiler-based image augmentation optimization"
 requires-python = ">=3.8"
 license = {text = "MIT OR Apache-2.0"}
