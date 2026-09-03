@@ -59,12 +59,14 @@ Compose([Brightness(), HorizontalFlip(), Contrast()])
 
 **What gets fused:**
 
-| Transform Type | Fuses With |
-|----------------|------------|
-| Photometric (LUT) | Other photometric LUT transforms → Single lookup table |
-| Photometric (Matrix) | Other matrix transforms → Single 3×3 matrix multiply |
-| Geometric (flips/rotates) | Other geometric transforms → Composed transform |
-| Mixed | Geometric transforms break photometric fusion (barriers) |
+| Transform Type | Fuses With | Compiler Optimization |
+|----------------|------------|-----------------------|
+| **Photometric (LUT)** | Other pointwise LUT transforms | Composed into a single 256-byte stack table (evaluated in 1 memory pass) |
+| **Crop + Photometric** | Crop hoisting | Crops are hoisted ahead of photometric ops, eliminating up to 80% of dead pixel compute |
+| **Resize + LUT** | Contiguous Resize + LUT | Resampling streams directly into LUT transformation without intermediate buffers |
+| **Geometric D4** | Flips and 90° rotations | Composed algebraically using the dihedral group $D_4$ into a single-pass orientation |
+| **Photometric (Matrix)** | Other color matrix transforms | Composed via $3 \times 3$ matrix multiplication into a single linear pass |
+| **Barriers** | Convolutions / Noise / Blur | Non-fuseable operations form pipeline barriers executed via native SIMD kernels |
 
 ---
 
@@ -152,6 +154,39 @@ batch_out = pipeline(images_4d)["image"]
 batch_out = pipeline.apply(images_4d)
 ```
 
+### 8. Temporal-Consistent Video Augmentation (`apply_video`, `apply_video_batch`)
+Video models require **temporal spatial consistency**: if frame 0 is flipped or cropped at $(x, y)$, every subsequent frame in the clip must undergo the exact same transformation to prevent flickering and camera jumps.
+
+Sinter samples the pipeline once per video clip and executes the compiled plan across all $T$ frames in parallel using Rayon with zero GIL contention:
+
+```python
+# 1. Single video clip: 4D PyTorch [T, C, H, W] or NumPy [T, H, W, C]
+video_clip = torch.randint(0, 256, (16, 3, 256, 256), dtype=torch.uint8)
+aug_clip = pipeline.apply_video(video_clip)  # Shape: [16, 3, 224, 224] (all frames match spatially)
+
+# 2. Batch of video clips: 5D PyTorch [B, T, C, H, W]
+video_batch = torch.randint(0, 256, (4, 16, 3, 256, 256), dtype=torch.uint8)
+aug_batch = pipeline.apply_video_batch(video_batch, num_threads=8)
+```
+
+*Throughput: >21,100 frames per second on CPU.*
+
+### 9. Native VLM Dynamic Tiling (`AnyRes`)
+Modern multimodal LLMs (LLaVA-NeXT, Qwen2-VL, InternVL 2.0, Llama 3.2 Vision) do not downscale images to small squares. Instead, they partition arbitrary-resolution images into a grid of standard patches (e.g. $448 \times 448$) plus a global downsampled thumbnail.
+
+Sinter provides a native, pure SIMD `AnyRes` operator that computes the optimal aspect-ratio grid and slices/resamples tiles in a single pass:
+
+```python
+from sinter import AnyRes
+
+anyres = AnyRes(tile_size=448, max_tiles=6, include_thumbnail=True)
+
+# Slices a 1080p image (1920x1080) into an optimal 2x1 grid + 1 global thumbnail
+tiles = anyres(image_torch)  # Returns stacked tensor: [3, 3, 448, 448]
+```
+
+*Throughput: >520 full-HD images per second on CPU (1.9 ms per 1080p image).*
+
 ---
 
 ## Benchmarks
@@ -160,11 +195,20 @@ Benchmark results on **Apple M4** (ARM64), single-threaded, generated with the b
 
 ### Pipeline Speedups (RGB)
 
-| Pipeline | 512×512 Image | 1024×1024 Image | Fusion Strategy |
-|----------|---------------|-----------------|-----------------|
-| **4 LUT transforms** | **1.9x faster** (0.09 ms vs 0.17 ms) | **1.7x faster** (0.37 ms vs 0.62 ms) | 4 ops → 1 lookup table pass |
-| **8 LUT transforms** | **4.9x faster** (0.08 ms vs 0.39 ms) | **4.3x faster** (0.34 ms vs 1.43 ms) | 8 ops → 1 lookup table pass |
-| **Heavy pipeline** (16 sinter / 14 alb transforms) | **4.7x faster** (1.46 ms vs 6.90 ms) | **4.7x faster** (5.96 ms vs 28.24 ms) | Multi-phase fusion + SIMD |
+| Pipeline | 256×256 Image | 512×512 Image | 1024×1024 Image | Fusion Strategy |
+|----------|---------------|---------------|-----------------|-----------------|
+| **4 LUT transforms** (`Brightness`, `Contrast`, `Gamma`, `Solarize`) | **3.6x faster** (19 µs vs 68 µs) | **3.9x faster** (69 µs vs 268 µs) | **1.7x faster** (0.37 ms vs 0.62 ms) | 4 ops → 1 lookup table pass |
+| **6 LUT transforms** (+ `Posterize`, `Invert`) | **3.9x faster** (19 µs vs 74 µs) | **4.2x faster** (68 µs vs 290 µs) | **4.4x faster** (0.34 ms vs 1.47 ms) | 6 ops → 1 lookup table pass |
+| **Crop Hoisting + LUT** (`Brightness`, `Contrast`, `Crop`) | **5.4x faster** (6.6 µs vs 36 µs) | **6.4x faster** (21 µs vs 137 µs) | **6.5x faster** | Hoists crop ahead of photometric ops |
+| **D4 Geometric** (`FlipH` + `FlipV` → `Rot180`) | **1.8x faster** (4.6 µs vs 8.3 µs) | **2.2x faster** (14 µs vs 32 µs) | **2.2x faster** | Dihedral algebraic composition |
+| **Heavy pipeline** (16 sinter / 14 alb transforms) | **5.2x faster** (0.37 ms vs 1.95 ms) | **5.1x faster** (1.40 ms vs 7.07 ms) | **4.8x faster** (5.70 ms vs 27.23 ms) | Multi-phase fusion + SIMD kernels |
+
+### High-Throughput Video & VLM Benchmarks
+
+| Workload | Input Dimension | Latency | Throughput | Notes |
+|----------|-----------------|---------|------------|-------|
+| **Video Clip Augmentation** | 16 frames (`16×3×256×256`) | **0.757 ms** / clip | **>21,100 fps** | Fused Flip + Photometric + Crop with 100% temporal consistency |
+| **VLM AnyRes Dynamic Tiling** | Full 1080p (`3×1080×1920`) | **1.90 ms** / image | **>520 img/sec** | Optimal 2×1 grid slicing + global thumbnail resample to `(3, 3, 448, 448)` |
 
 ### Individual Transform Speedups (ARM64 NEON vs Albumentations)
 
@@ -181,10 +225,16 @@ Sinter includes hand-written NEON intrinsics for ARM64 that provide significant 
 | **Sharpen** | **3.3x** | **3.2x** | 3×3 convolution kernel |
 | **ToGray** | **1.4x** | **1.4x** | SIMD RGB luminance weighting |
 
+### Fuzzing & Robustness (1,000 Random Augmentation Chains)
+Sinter includes an automated fuzzing and verification suite ([`python/benchmarks/benchmark_1000_chains.py`](python/benchmarks/benchmark_1000_chains.py)) that generates 1,000 randomly selected augmentation pipelines across all 23 operators and verifies correctness between sequential and fused execution:
+- **1,000 / 1,000 chains passed (100.0% pass rate)**.
+- 97.2% bit-exact parity (`max_diff = 0`).
+- 2.8% multi-matrix float32 accumulation parity (single final clamp vs intermediate 8-bit truncation).
+
 **Notes**:
 - Primary target is ARM64 (Apple Silicon, AWS Graviton) with native NEON intrinsics alongside portable scalar fallbacks.
 - Speedup scales with transform count: the more operations in the pipeline, the more passes Sinter fuses away.
-- Run the benchmark suites yourself via `python python/benchmarks/benchmark_fusion.py` and `python python/benchmarks/benchmark_individual.py`.
+- Run the benchmark suites yourself via `python python/benchmarks/benchmark_fusion.py` and `python python/benchmarks/benchmark_1000_chains.py`.
 
 ---
 
@@ -343,10 +393,14 @@ Sinter is **100% pure Rust + SIMD** with zero OpenCV or C++ dependencies. The on
 
 This is an ongoing research project. Key milestones completed:
 
-- [x] Compilation & JIT-style operator fusion (LUT, matrix, geometric D4)
-- [x] Pure native SIMD architecture (zero C++ dependencies)
+- [x] Compilation & JIT-style operator fusion (pointwise LUT, matrix, geometric D4, crop hoisting)
+- [x] Zero-allocation static execution dispatch ([KernelKind monomorphic enum](src/exec_ir/nodes.rs))
+- [x] Pure native SIMD architecture (zero OpenCV / C++ dependencies)
 - [x] Zero-copy PyTorch tensor & multi-target transformation
 - [x] High-throughput parallel batch execution (Rayon + GIL release)
+- [x] Spatio-temporal video clip and batch augmentation (`apply_video`, `apply_video_batch` >21,000 fps)
+- [x] Native AnyRes dynamic tiling for modern Vision-Language Models (Qwen2-VL, LLaVA-NeXT)
+- [x] Automated 1,000-chain randomized corpus fuzzing & correctness verification (100% pass rate)
 - [x] Visualization of compiled plans (`explain`, `to_mermaid`, `visualize`)
 - [x] Broad photometric, geometric, kernel, and dropout transform coverage
 - [x] Clean ergonomics: `Choice`, distribution engine, pass-through metadata, format inheritance
