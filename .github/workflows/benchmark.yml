@@ -42,9 +42,13 @@ jobs:
         pip install --upgrade pip
         pip install maturin numpy opencv-python-headless albumentations torch
 
-    - name: Build and install Sinter (release with SIMD)
+    - name: Build wheel (release with SIMD)
       run: |
-        maturin develop --release --features "python"
+        maturin build --release --features "python" --out dist
+
+    - name: Install Sinter wheel
+      run: |
+        pip install dist/*.whl
 
     - name: Run CI Benchmark Suite
       run: |
