@@ -28,3 +28,6 @@ worktrees/
 
 # Build artifacts (CI builds and uploads wheels)
 dist/
+
+# Machine-specific build config dumps (contain local paths)
+build_info.txt
